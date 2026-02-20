@@ -1,0 +1,136 @@
+.codex-cli-block {
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 8px;
+	padding: 12px;
+	margin: 8px 0;
+	background: var(--background-secondary);
+}
+
+.codex-cli-block__header {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+	margin-bottom: 8px;
+}
+
+.codex-cli-block__status {
+	font-size: var(--font-ui-smaller);
+	color: var(--text-muted);
+	margin-bottom: 0;
+}
+
+.codex-cli-block__refresh {
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 6px;
+	background: var(--background-primary);
+	color: var(--text-muted);
+	font-size: var(--font-ui-small);
+	line-height: 1;
+	padding: 3px 8px;
+	cursor: pointer;
+}
+
+.codex-cli-block__refresh:hover:not(:disabled) {
+	color: var(--text-normal);
+	border-color: var(--text-muted);
+}
+
+.codex-cli-block__refresh:disabled {
+	opacity: 0.55;
+	cursor: default;
+}
+
+.codex-cli-block.is-loading .codex-cli-block__status::before {
+	content: "";
+	display: inline-block;
+	width: 0.85em;
+	height: 0.85em;
+	margin-right: 8px;
+	border-radius: 999px;
+	border: 2px solid var(--text-muted);
+	border-top-color: transparent;
+	vertical-align: text-bottom;
+	animation: codex-cli-spin 0.8s linear infinite;
+}
+
+.codex-cli-block__output {
+	min-height: 1.2em;
+}
+
+.codex-cli-block__error {
+	white-space: pre-wrap;
+	word-break: break-word;
+	font-family: var(--font-monospace);
+	font-size: var(--font-ui-small);
+	color: var(--text-error);
+}
+
+.codex-cli-block.is-error {
+	border-color: var(--text-error);
+}
+
+.codex-template-setting {
+	padding: 12px;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 8px;
+	margin-bottom: 12px;
+}
+
+.codex-settings-help {
+	margin-top: 0;
+	color: var(--text-muted);
+}
+
+.codex-execution-log {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+}
+
+.codex-execution-log-item {
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 8px;
+	padding: 8px 10px;
+	background: var(--background-secondary);
+}
+
+.codex-execution-log-summary {
+	cursor: pointer;
+	font-size: var(--font-ui-small);
+}
+
+.codex-execution-log-body {
+	margin-top: 10px;
+}
+
+.codex-execution-log-label {
+	font-size: var(--font-ui-small);
+	color: var(--text-muted);
+	margin: 8px 0 4px;
+}
+
+.codex-execution-log-pre {
+	white-space: pre-wrap;
+	word-break: break-word;
+	background: var(--background-primary);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 6px;
+	padding: 8px;
+	max-height: 260px;
+	overflow: auto;
+	margin: 0;
+}
+
+.codex-execution-log-error-label {
+	color: var(--text-error);
+}
+
+@keyframes codex-cli-spin {
+	from {
+		transform: rotate(0deg);
+	}
+	to {
+		transform: rotate(360deg);
+	}
+}

@@ -1,0 +1,11 @@
+{
+	"id": "obsidian-codex-cli-tools",
+	"name": "Obsidian Codex CLI Tools",
+	"version": "1.0.0",
+	"minAppVersion": "0.15.0",
+	"description": "Render Codex CLI prompt output inside Obsidian markdown blocks.",
+	"author": "Obsidian",
+	"authorUrl": "https://obsidian.md",
+	"fundingUrl": "https://obsidian.md/pricing",
+	"isDesktopOnly": true
+}
