@@ -126,6 +126,10 @@
 	color: var(--text-error);
 }
 
+.codex-execution-log-running-label {
+	color: var(--text-accent);
+}
+
 @keyframes codex-cli-spin {
 	from {
 		transform: rotate(0deg);

@@ -15,9 +15,15 @@ Render Codex CLI responses directly inside notes using a custom `codex` Markdown
 - Standardized prompt encourages Obsidian-flavored Markdown output and preserving relevant wikilinks when summarizing.
 - Stores an execution log in settings with timestamp, origin note, prompt, and response.
 - Stores an execution log in settings with timestamp, origin note, duration, prompt, and response.
+- Shows in-flight requests in the execution log while they are running.
+- Captures and persists streaming process output (stdout/stderr) per run for debugging.
+- Captures the effective command line arguments used for each run in the log browser.
 - Wraps each instruction in a standardized prompt that includes vault path, file path, backlinks, and outgoing links.
 - Supports a settings-level default model with per-block model override.
+- Supports a settings-level default reasoning effort with per-block override.
 - Supports enabling/disabling MCP server usage for plugin-run codex executions.
+- Supports configurable execution timeout in plugin settings.
+- Supports global instructions in plugin settings that are added to every prompt.
 
 ## Requirements
 
@@ -66,9 +72,29 @@ Summarize this note in 3 bullets.
 ```
 ````
 
+### 4) Reasoning effort override in a block
+
+Set a plugin-wide default reasoning effort in settings, then override per block when needed:
+
+````markdown
+```codex
+reasoning: low
+Summarize this note in 3 bullets.
+```
+````
+
 ## MCP server setting
 
 Use **Enable MCP servers** in plugin settings to control whether codex runs from this plugin can use configured MCP servers.
+When disabled, the plugin forces all detected configured MCP servers to `enabled=false` for that run.
+
+## Timeout setting
+
+Use **Execution timeout (seconds)** to control how long a codex run can take before it is stopped.
+
+## Global instructions setting
+
+Use **Global instructions** to define reusable instructions that should be prepended to every codex prompt.
 
 You can combine template + model override:
 
@@ -76,6 +102,17 @@ You can combine template + model override:
 ```codex
 template: weekly-summary
 model: gpt-5-nano
+Focus on blockers only.
+```
+````
+
+You can also combine reasoning with template/model directives:
+
+````markdown
+```codex
+template: weekly-summary
+model: gpt-5-mini
+reasoning: minimal
 Focus on blockers only.
 ```
 ````

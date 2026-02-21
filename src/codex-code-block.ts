@@ -1,12 +1,20 @@
 import path from 'path';
 import { createHash } from 'crypto';
 import { FileSystemAdapter, MarkdownRenderChild, MarkdownRenderer, Plugin } from 'obsidian';
-import type { CodexCliToolsSettings, ExecutionLogEntry, PromptTemplate } from './settings';
+import type { CodexCliToolsSettings, PromptTemplate } from './settings';
 
 interface CodexBlockDependencies {
 	getSettings: () => CodexCliToolsSettings;
-	runPrompt: (prompt: string, options?: { model?: string | null }) => Promise<string>;
-	logExecution: (entry: Omit<ExecutionLogEntry, 'id'>) => Promise<void>;
+	runPrompt: (prompt: string, options?: {
+		model?: string | null;
+		reasoningEffort?: string | null;
+		onInvocation?: (invocation: { command: string; args: string[] }) => void;
+		onOutputChunk?: (chunk: { stream: 'stdout' | 'stderr'; text: string }) => void;
+	}) => Promise<string>;
+	startExecutionLog: (entry: { timestamp: string; originNote: string; prompt: string }) => Promise<string>;
+	setExecutionLogInvocation: (id: string, invocation: { command: string; args: string[] }) => Promise<void>;
+	appendExecutionLogOutput: (id: string, stream: 'stdout' | 'stderr', text: string) => Promise<void>;
+	completeExecutionLog: (id: string, entry: { response: string; wasError: boolean; durationMs: number }) => Promise<void>;
 	getCachedResponse: (promptHash: string) => string | null;
 	cacheResponse: (promptHash: string, response: string) => Promise<void>;
 }
@@ -15,6 +23,7 @@ interface ResolvedPrompt {
 	prompt: string;
 	templateId: string | null;
 	modelOverride: string | null;
+	reasoningOverride: string | null;
 }
 
 interface PromptContext {
@@ -27,6 +36,7 @@ interface PromptContext {
 
 const TEMPLATE_REFERENCE_REGEX = /^(template|use)\s*:\s*(.+)$/iu;
 const MODEL_REFERENCE_REGEX = /^model\s*:\s*(.+)$/iu;
+const REASONING_REFERENCE_REGEX = /^(reasoning|reasoning_effort)\s*:\s*(.+)$/iu;
 
 export function registerCodexCodeBlockProcessor(plugin: Plugin, dependencies: CodexBlockDependencies): void {
 	plugin.registerMarkdownCodeBlockProcessor('codex', async (source, el, ctx) => {
@@ -47,9 +57,9 @@ export function registerCodexCodeBlockProcessor(plugin: Plugin, dependencies: Co
 		const runExecution = async (forceRefresh: boolean): Promise<void> => {
 			runSequence += 1;
 			const runId = runSequence;
-			let promptForLog = source;
 			const timestamp = new Date().toISOString();
 			const startedAt = Date.now();
+			let executionLogId: string | null = null;
 			const promptContext = buildPromptContext(plugin, ctx.sourcePath);
 
 			blockEl.removeClass('is-error');
@@ -57,9 +67,13 @@ export function registerCodexCodeBlockProcessor(plugin: Plugin, dependencies: Co
 			refreshButtonEl.disabled = true;
 
 			try {
-				const resolvedPrompt = resolvePrompt(source, dependencies.getSettings().promptTemplates);
-				const wrappedPrompt = buildStandardizedPrompt(resolvedPrompt.prompt, promptContext);
-				promptForLog = wrappedPrompt;
+				const pluginSettings = dependencies.getSettings();
+				const resolvedPrompt = resolvePrompt(source, pluginSettings.promptTemplates);
+				const wrappedPrompt = buildStandardizedPrompt(
+					resolvedPrompt.prompt,
+					promptContext,
+					pluginSettings.globalInstructions,
+				);
 				const wrappedPromptHash = hashPrompt(wrappedPrompt);
 				statusEl.setText(
 					resolvedPrompt.templateId
@@ -82,35 +96,58 @@ export function registerCodexCodeBlockProcessor(plugin: Plugin, dependencies: Co
 					}
 				}
 
-				const response = await dependencies.runPrompt(wrappedPrompt, {
-					model: resolvedPrompt.modelOverride,
-				});
-				await cacheResponseSafely(dependencies, wrappedPromptHash, response);
-				await logExecutionSafely(dependencies, {
+				executionLogId = await startExecutionLogSafely(dependencies, {
 					timestamp,
 					originNote: ctx.sourcePath,
 					prompt: wrappedPrompt,
-					response,
-					wasError: false,
-					durationMs: Date.now() - startedAt,
 				});
+
+				const response = await dependencies.runPrompt(wrappedPrompt, {
+					model: resolvedPrompt.modelOverride,
+					reasoningEffort: resolvedPrompt.reasoningOverride,
+					onInvocation: (invocation) => {
+						if (!executionLogId) {
+							return;
+						}
+						void setExecutionLogInvocationSafely(dependencies, executionLogId, invocation);
+					},
+					onOutputChunk: (chunk) => {
+						if (!executionLogId) {
+							return;
+						}
+						void appendExecutionLogOutputSafely(
+							dependencies,
+							executionLogId,
+							chunk.stream,
+							chunk.text,
+						);
+					},
+				});
+				await cacheResponseSafely(dependencies, wrappedPromptHash, response);
+				if (executionLogId) {
+					await completeExecutionLogSafely(dependencies, executionLogId, {
+						response,
+						wasError: false,
+						durationMs: Date.now() - startedAt,
+					});
+				}
 
 				if (!isRunActive(runId)) {
 					return;
 				}
 
+				const durationMs = Date.now() - startedAt;
 				blockEl.removeClass('is-loading');
-				statusEl.setText('Codex result');
+				statusEl.setText(`Codex result generated in ${formatBlockDuration(durationMs)}`);
 				await renderCodexResponse(plugin, ctx.sourcePath, outputEl, response, ctx);
 			} catch (error: unknown) {
-				await logExecutionSafely(dependencies, {
-					timestamp,
-					originNote: ctx.sourcePath,
-					prompt: promptForLog,
-					response: getErrorMessage(error),
-					wasError: true,
-					durationMs: Date.now() - startedAt,
-				});
+				if (executionLogId) {
+					await completeExecutionLogSafely(dependencies, executionLogId, {
+						response: getErrorMessage(error),
+						wasError: true,
+						durationMs: Date.now() - startedAt,
+					});
+				}
 
 				if (!isRunActive(runId)) {
 					return;
@@ -222,7 +259,13 @@ function getBacklinks(plugin: Plugin, sourcePath: string): string[] {
 	return [...backlinks].sort((a, b) => a.localeCompare(b));
 }
 
-function buildStandardizedPrompt(userInstruction: string, context: PromptContext): string {
+function buildStandardizedPrompt(
+	userInstruction: string,
+	context: PromptContext,
+	globalInstructions: string,
+): string {
+	const trimmedGlobalInstructions = globalInstructions.trim();
+
 	return [
 		'You are Codex running inside an Obsidian plugin block.',
 		'Use the context below to complete the user instruction.',
@@ -243,6 +286,16 @@ function buildStandardizedPrompt(userInstruction: string, context: PromptContext
 		'- Backlinks:',
 		formatLinkList(context.backlinks),
 		'',
+		...(trimmedGlobalInstructions
+			? [
+				'Global instructions:',
+				'<global_instructions>',
+				trimmedGlobalInstructions,
+				'</global_instructions>',
+				'',
+			]
+			: []),
+		'',
 		'User instruction:',
 		'<instruction>',
 		userInstruction.trim(),
@@ -257,12 +310,57 @@ function formatLinkList(links: string[]): string {
 	return links.map((link) => `- ${link}`).join('\n');
 }
 
-async function logExecutionSafely(
+function formatBlockDuration(durationMs: number): string {
+	if (durationMs < 1000) {
+		return `${durationMs}ms`;
+	}
+	return `${(durationMs / 1000).toFixed(2)}s`;
+}
+
+async function startExecutionLogSafely(
 	dependencies: CodexBlockDependencies,
-	entry: Omit<ExecutionLogEntry, 'id'>,
+	entry: { timestamp: string; originNote: string; prompt: string },
+): Promise<string | null> {
+	try {
+		return await dependencies.startExecutionLog(entry);
+	} catch {
+		// Logging must never break markdown rendering.
+		return null;
+	}
+}
+
+async function completeExecutionLogSafely(
+	dependencies: CodexBlockDependencies,
+	id: string,
+	entry: { response: string; wasError: boolean; durationMs: number },
 ): Promise<void> {
 	try {
-		await dependencies.logExecution(entry);
+		await dependencies.completeExecutionLog(id, entry);
+	} catch {
+		// Logging must never break markdown rendering.
+	}
+}
+
+async function setExecutionLogInvocationSafely(
+	dependencies: CodexBlockDependencies,
+	id: string,
+	invocation: { command: string; args: string[] },
+): Promise<void> {
+	try {
+		await dependencies.setExecutionLogInvocation(id, invocation);
+	} catch {
+		// Logging must never break markdown rendering.
+	}
+}
+
+async function appendExecutionLogOutputSafely(
+	dependencies: CodexBlockDependencies,
+	id: string,
+	stream: 'stdout' | 'stderr',
+	text: string,
+): Promise<void> {
+	try {
+		await dependencies.appendExecutionLogOutput(id, stream, text);
 	} catch {
 		// Logging must never break markdown rendering.
 	}
@@ -298,6 +396,7 @@ function resolvePrompt(source: string, templates: PromptTemplate[]): ResolvedPro
 			prompt: instructionBody,
 			templateId: null,
 			modelOverride: directives.modelOverride,
+			reasoningOverride: directives.reasoningOverride,
 		};
 	}
 
@@ -314,12 +413,14 @@ function resolvePrompt(source: string, templates: PromptTemplate[]): ResolvedPro
 		prompt: instructionBody ? `${template.prompt}\n\n${instructionBody}` : template.prompt,
 		templateId: directives.templateId,
 		modelOverride: directives.modelOverride,
+		reasoningOverride: directives.reasoningOverride,
 	};
 }
 
 function extractBlockDirectives(lines: string[]): {
 	templateId: string | null;
 	modelOverride: string | null;
+	reasoningOverride: string | null;
 	instructionsStartIndex: number;
 } {
 	let index = 0;
@@ -329,6 +430,7 @@ function extractBlockDirectives(lines: string[]): {
 
 	let templateId: string | null = null;
 	let modelOverride: string | null = null;
+	let reasoningOverride: string | null = null;
 
 	while (index < lines.length) {
 		const line = lines[index] ?? '';
@@ -360,12 +462,24 @@ function extractBlockDirectives(lines: string[]): {
 			continue;
 		}
 
+		const reasoningMatch = REASONING_REFERENCE_REGEX.exec(trimmed);
+		if (reasoningMatch) {
+			const parsedReasoning = (reasoningMatch[2] ?? '').trim();
+			if (!parsedReasoning) {
+				throw new Error('Reasoning override is missing a value. Use: reasoning: low');
+			}
+			reasoningOverride = parsedReasoning;
+			index += 1;
+			continue;
+		}
+
 		break;
 	}
 
 	return {
 		templateId,
 		modelOverride,
+		reasoningOverride,
 		instructionsStartIndex: index,
 	};
 }
