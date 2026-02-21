@@ -6,15 +6,20 @@ import { OllamaProvider } from './providers/ollama-provider';
 import {
 	type AgentBlocksSettings,
 	type AgentTemplate,
+	type AgentTemplateContextConfig,
 	type CodexAgentProviderConfig,
 	type ExecutionLogEntry,
+	type LinkedNoteContentContextConfig,
+	type LinkedNoteSelectionMode,
 	type PromptCacheEntry,
 	type OllamaAgentProviderConfig,
 	AgentSettingTab,
 	DEFAULT_CODEX_PROVIDER_CONFIG,
 	DEFAULT_OLLAMA_PROVIDER_CONFIG,
+	DEFAULT_TEMPLATE_CONTEXT_CONFIG,
 	DEFAULT_SETTINGS,
 	createDefaultCodexAgentTemplate,
+	createDefaultTemplateContextConfig,
 	createTemplateId,
 } from './settings';
 
@@ -23,11 +28,18 @@ const MAX_PROMPT_CACHE_ENTRIES = 1000;
 const MAX_PROCESS_OUTPUT_CHARS = 100_000;
 const PROCESS_OUTPUT_SAVE_INTERVAL_MS = 500;
 
+interface ProcessOutputState {
+	atLineStart: boolean;
+	lastStream: 'stdout' | 'stderr' | null;
+}
+
 export default class AgentBlocksPlugin extends Plugin {
 	settings!: AgentBlocksSettings;
 	private readonly codexProvider = new CodexCliProvider();
 	private readonly ollamaProvider = new OllamaProvider();
 	private readonly lastProcessOutputSaveAtByLogId = new Map<string, number>();
+	private readonly processOutputStateByLogId = new Map<string, ProcessOutputState>();
+	private settingTab: AgentSettingTab | null = null;
 
 	async onload(): Promise<void> {
 		await this.loadSettings();
@@ -44,12 +56,14 @@ export default class AgentBlocksPlugin extends Plugin {
 			cacheResponse: async (promptHash: string, response: string) => this.saveCachedResponse(promptHash, response),
 		});
 
-		this.addSettingTab(new AgentSettingTab(this.app, this));
+		this.settingTab = new AgentSettingTab(this.app, this);
+		this.addSettingTab(this.settingTab);
 	}
 
 	onunload(): void {
 		this.codexProvider.dispose();
 		this.ollamaProvider.dispose?.();
+		this.settingTab = null;
 	}
 
 	async loadSettings(): Promise<void> {
@@ -125,6 +139,7 @@ export default class AgentBlocksPlugin extends Plugin {
 			durationMs: Number.NaN,
 			status: 'running',
 		});
+		this.processOutputStateByLogId.set(id, { atLineStart: true, lastStream: null });
 		if (this.settings.executionLog.length > MAX_EXECUTION_LOG_ENTRIES) {
 			this.settings.executionLog = this.settings.executionLog.slice(0, MAX_EXECUTION_LOG_ENTRIES);
 			const retainedIds = new Set(this.settings.executionLog.map((logEntry) => logEntry.id));
@@ -133,8 +148,14 @@ export default class AgentBlocksPlugin extends Plugin {
 					this.lastProcessOutputSaveAtByLogId.delete(logId);
 				}
 			}
+			for (const logId of this.processOutputStateByLogId.keys()) {
+				if (!retainedIds.has(logId)) {
+					this.processOutputStateByLogId.delete(logId);
+				}
+			}
 		}
 		await this.saveSettings();
+		this.settingTab?.notifyExecutionLogUpdated();
 		return id;
 	}
 
@@ -147,6 +168,7 @@ export default class AgentBlocksPlugin extends Plugin {
 		existing.command = invocation.command;
 		existing.commandArgs = [...invocation.args];
 		await this.saveSettings();
+		this.settingTab?.notifyExecutionLogUpdated();
 	}
 
 	private async appendExecutionLogOutput(
@@ -163,17 +185,21 @@ export default class AgentBlocksPlugin extends Plugin {
 			return;
 		}
 
-		const prefixed = prefixProcessOutput(stream, text);
-		existing.processOutput = trimProcessOutput(`${existing.processOutput}${prefixed}`);
+		const state = this.processOutputStateByLogId.get(id) ?? { atLineStart: true, lastStream: null };
+		const formattedChunk = formatProcessOutputChunk(state, stream, text);
+		this.processOutputStateByLogId.set(id, state);
+		existing.processOutput = trimProcessOutput(`${existing.processOutput}${formattedChunk}`);
 
 		const now = Date.now();
 		const lastSavedAt = this.lastProcessOutputSaveAtByLogId.get(id) ?? 0;
 		if (now - lastSavedAt < PROCESS_OUTPUT_SAVE_INTERVAL_MS) {
+			this.settingTab?.notifyExecutionLogUpdated();
 			return;
 		}
 
 		this.lastProcessOutputSaveAtByLogId.set(id, now);
 		await this.saveSettings();
+		this.settingTab?.notifyExecutionLogUpdated();
 	}
 
 	private async completeExecutionLog(
@@ -190,7 +216,9 @@ export default class AgentBlocksPlugin extends Plugin {
 		existing.durationMs = entry.durationMs;
 		existing.status = entry.wasError ? 'error' : 'success';
 		this.lastProcessOutputSaveAtByLogId.delete(id);
+		this.processOutputStateByLogId.delete(id);
 		await this.saveSettings();
+		this.settingTab?.notifyExecutionLogUpdated();
 	}
 
 	private async saveCachedResponse(promptHash: string, response: string): Promise<void> {
@@ -240,6 +268,7 @@ function migrateAgentTemplates(loaded: Record<string, unknown>): AgentTemplate[]
 		id: legacyTemplate.id,
 		name: legacyTemplate.name,
 		instructions: legacyTemplate.prompt,
+		context: createDefaultTemplateContextConfig(),
 		provider: 'codex' as const,
 		providerConfig: { ...legacyCodexConfig },
 	}));
@@ -272,6 +301,7 @@ function normalizeAgentTemplate(value: unknown): AgentTemplate | null {
 			id,
 			name,
 			instructions,
+			context: normalizeTemplateContext(raw.context),
 			provider,
 			providerConfig: normalizeCodexConfig(raw.providerConfig),
 		};
@@ -281,9 +311,55 @@ function normalizeAgentTemplate(value: unknown): AgentTemplate | null {
 		id,
 		name,
 		instructions,
+		context: normalizeTemplateContext(raw.context),
 		provider,
 		providerConfig: normalizeOllamaConfig(raw.providerConfig),
 	};
+}
+
+function normalizeTemplateContext(value: unknown): AgentTemplateContextConfig {
+	if (!value || typeof value !== 'object') {
+		return createDefaultTemplateContextConfig();
+	}
+	const raw = value as Record<string, unknown>;
+	return {
+		linkedNoteContent: normalizeLinkedNoteContentContext(raw.linkedNoteContent),
+	};
+}
+
+function normalizeLinkedNoteContentContext(value: unknown): LinkedNoteContentContextConfig {
+	if (!value || typeof value !== 'object') {
+		return { ...DEFAULT_TEMPLATE_CONTEXT_CONFIG.linkedNoteContent };
+	}
+	const raw = value as Record<string, unknown>;
+	return {
+		selectionMode: normalizeLinkedSelectionMode(raw.selectionMode),
+		enabled: typeof raw.enabled === 'boolean'
+			? raw.enabled
+			: DEFAULT_TEMPLATE_CONTEXT_CONFIG.linkedNoteContent.enabled,
+		maxNotes: normalizeLinkedMaxNotes(raw.maxNotes),
+		maxCharsPerNote: normalizeLinkedMaxChars(raw.maxCharsPerNote),
+		includeOutgoingLinks: typeof raw.includeOutgoingLinks === 'boolean'
+			? raw.includeOutgoingLinks
+			: DEFAULT_TEMPLATE_CONTEXT_CONFIG.linkedNoteContent.includeOutgoingLinks,
+		includeBacklinks: typeof raw.includeBacklinks === 'boolean'
+			? raw.includeBacklinks
+			: DEFAULT_TEMPLATE_CONTEXT_CONFIG.linkedNoteContent.includeBacklinks,
+	};
+}
+
+function normalizeLinkedSelectionMode(value: unknown): LinkedNoteSelectionMode {
+	if (typeof value !== 'string') {
+		return DEFAULT_TEMPLATE_CONTEXT_CONFIG.linkedNoteContent.selectionMode;
+	}
+	const normalized = value.trim().toLowerCase();
+	if (normalized === 'recently-created') {
+		return 'recently-created';
+	}
+	if (normalized === 'recently-modified') {
+		return 'recently-modified';
+	}
+	return DEFAULT_TEMPLATE_CONTEXT_CONFIG.linkedNoteContent.selectionMode;
 }
 
 function normalizeCodexConfig(value: unknown): CodexAgentProviderConfig {
@@ -366,6 +442,32 @@ function normalizeNumPredict(value: unknown): number {
 	}
 	if (value > 32768) {
 		return 32768;
+	}
+	return Math.round(value);
+}
+
+function normalizeLinkedMaxNotes(value: unknown): number {
+	if (typeof value !== 'number' || !Number.isFinite(value)) {
+		return DEFAULT_TEMPLATE_CONTEXT_CONFIG.linkedNoteContent.maxNotes;
+	}
+	if (value < 0) {
+		return 0;
+	}
+	if (value > 50) {
+		return 50;
+	}
+	return Math.round(value);
+}
+
+function normalizeLinkedMaxChars(value: unknown): number {
+	if (typeof value !== 'number' || !Number.isFinite(value)) {
+		return DEFAULT_TEMPLATE_CONTEXT_CONFIG.linkedNoteContent.maxCharsPerNote;
+	}
+	if (value < 200) {
+		return 200;
+	}
+	if (value > 100_000) {
+		return 100_000;
 	}
 	return Math.round(value);
 }
@@ -502,13 +604,40 @@ function enforcePromptCacheLimit(cache: Record<string, PromptCacheEntry>, limit:
 		});
 }
 
-function prefixProcessOutput(stream: 'stdout' | 'stderr', text: string): string {
-	const streamPrefix = stream === 'stderr' ? '[stderr] ' : '[stdout] ';
-	const lines = text.replace(/\r\n/g, '\n').split('\n');
-	const prefixedLines = lines
-		.filter((line, index) => line.length > 0 || index < lines.length - 1)
-		.map((line) => `${streamPrefix}${line}`);
-	return prefixedLines.join('\n') + (text.endsWith('\n') ? '\n' : '');
+function formatProcessOutputChunk(
+	state: ProcessOutputState,
+	stream: 'stdout' | 'stderr',
+	text: string,
+): string {
+	if (!text) {
+		return '';
+	}
+
+	const normalizedText = text.replace(/\r\n/g, '\n');
+	let output = '';
+
+	if (state.lastStream !== null && state.lastStream !== stream && !state.atLineStart) {
+		output += '\n';
+		state.atLineStart = true;
+	}
+
+	for (const char of normalizedText) {
+		if (state.atLineStart) {
+			if (state.lastStream !== stream) {
+				output += `[${stream}]\n`;
+				state.lastStream = stream;
+			}
+			state.atLineStart = false;
+		}
+
+		output += char;
+
+		if (char === '\n') {
+			state.atLineStart = true;
+		}
+	}
+
+	return output;
 }
 
 function trimProcessOutput(output: string): string {

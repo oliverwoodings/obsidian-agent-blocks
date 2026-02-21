@@ -26,6 +26,8 @@ Render local LLM output directly inside notes using an `agent` Markdown code blo
   - current file path
   - outgoing links
   - backlinks
+- Template-configurable context sources (currently linked note content).
+- Per-block context source overrides (enable/disable and sizing).
 - Global instructions applied to every run.
 - Per-block provider overrides (for example model, reasoning, temperature, timeout, mcp, local provider).
 
@@ -44,6 +46,10 @@ Render local LLM output directly inside notes using an `agent` Markdown code blo
 Summarize this note into 5 action items.
 ```
 ````
+
+`linked_content_selection` supports:
+- `recently-modified` (default)
+- `recently-created`
 
 ### Template reference
 
@@ -79,6 +85,21 @@ temperature: 0.1
 num_predict: 700
 host: http://127.0.0.1:11434
 Summarize this file.
+```
+````
+
+### Context source overrides in a block
+
+````markdown
+```agent
+template: fast-summary
+linked_content: true
+linked_content_max_notes: 6
+linked_content_max_chars: 1500
+linked_content_selection: recently-modified
+linked_content_include_outgoing: true
+linked_content_include_backlinks: false
+Summarize this note and key linked context.
 ```
 ````
 

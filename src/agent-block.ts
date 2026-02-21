@@ -1,8 +1,15 @@
 import path from 'path';
 import { createHash } from 'crypto';
-import { FileSystemAdapter, MarkdownRenderChild, MarkdownRenderer, Plugin } from 'obsidian';
+import { stat } from 'fs/promises';
+import { FileSystemAdapter, MarkdownRenderChild, MarkdownRenderer, Plugin, TFile } from 'obsidian';
 import type { AgentBlockOverrides, AgentInvocation, AgentOutputChunk } from './agent-types';
-import type { AgentBlocksSettings, AgentTemplate } from './settings';
+import type {
+	AgentBlocksSettings,
+	AgentTemplate,
+	AgentTemplateContextConfig,
+	LinkedNoteContentContextConfig,
+	LinkedNoteSelectionMode,
+} from './settings';
 
 interface AgentBlockDependencies {
 	getSettings: () => AgentBlocksSettings;
@@ -36,14 +43,36 @@ interface ResolvedBlockRequest {
 	template: AgentTemplate;
 	prompt: string;
 	overrides: AgentBlockOverrides;
+	contextConfig: AgentTemplateContextConfig;
 }
 
 interface PromptContext {
 	vaultRootPath: string;
 	currentFilePath: string;
 	currentFileVaultPath: string;
-	outgoingLinks: string[];
-	backlinks: string[];
+	currentNoteContent: string;
+	currentNoteAvailable: boolean;
+	linkedNoteSnapshots: LinkedNoteSnapshot[];
+	linkedNoteContentEnabled: boolean;
+	linkedNoteSelectionMode: LinkedNoteSelectionMode;
+}
+
+interface LinkedNoteSnapshot {
+	path: string;
+	relationship: 'outgoing' | 'backlink' | 'outgoing+backlink';
+	createdDate: string;
+	modifiedDate: string;
+	content: string;
+	wasTruncated: boolean;
+}
+
+interface LinkedNoteCandidate {
+	file: TFile;
+	createdTimestamp: number;
+}
+
+interface BlockContextOverrides {
+	linkedNoteContent?: Partial<LinkedNoteContentContextConfig>;
 }
 
 const TEMPLATE_REFERENCE_REGEX = /^(template|use)\s*:\s*(.+)$/iu;
@@ -57,6 +86,12 @@ const KEEP_ALIVE_REFERENCE_REGEX = /^(keep_alive|keepalive)\s*:\s*(.+)$/iu;
 const NUM_PREDICT_REFERENCE_REGEX = /^(num_predict|max_tokens)\s*:\s*(.+)$/iu;
 const OSS_REFERENCE_REGEX = /^(oss|codex_oss)\s*:\s*(.+)$/iu;
 const LOCAL_PROVIDER_REFERENCE_REGEX = /^(local_provider|codex_local_provider)\s*:\s*(.+)$/iu;
+const CONTEXT_LINKED_ENABLED_REGEX = /^(context\.linked_note_content\.enabled|linked_content)\s*:\s*(.+)$/iu;
+const CONTEXT_LINKED_MAX_NOTES_REGEX = /^(context\.linked_note_content\.max_notes|linked_content_max_notes)\s*:\s*(.+)$/iu;
+const CONTEXT_LINKED_MAX_CHARS_REGEX = /^(context\.linked_note_content\.max_chars_per_note|linked_content_max_chars)\s*:\s*(.+)$/iu;
+const CONTEXT_LINKED_INCLUDE_OUTGOING_REGEX = /^(context\.linked_note_content\.include_outgoing_links|linked_content_include_outgoing)\s*:\s*(.+)$/iu;
+const CONTEXT_LINKED_INCLUDE_BACKLINKS_REGEX = /^(context\.linked_note_content\.include_backlinks|linked_content_include_backlinks)\s*:\s*(.+)$/iu;
+const CONTEXT_LINKED_SELECTION_REGEX = /^(context\.linked_note_content\.selection|linked_content_selection)\s*:\s*(.+)$/iu;
 
 export function registerAgentCodeBlockProcessor(plugin: Plugin, dependencies: AgentBlockDependencies): void {
 	plugin.registerMarkdownCodeBlockProcessor('agent', async (source, el, ctx) => {
@@ -85,15 +120,20 @@ export function registerAgentCodeBlockProcessor(plugin: Plugin, dependencies: Ag
 			blockEl.addClass('is-loading');
 			refreshButtonEl.disabled = true;
 
-			try {
-				const resolvedBlock = resolveBlockRequest(source, dependencies);
-				const promptContext = buildPromptContext(plugin, ctx.sourcePath);
-				const standardizedPrompt = buildStandardizedPrompt(
-					resolvedBlock.prompt,
-					promptContext,
-					dependencies.getSettings().globalInstructions,
-				);
-				const cacheKey = buildCacheKey(standardizedPrompt, resolvedBlock.template, resolvedBlock.overrides);
+				try {
+					const resolvedBlock = resolveBlockRequest(source, dependencies);
+					const promptContext = await buildPromptContext(plugin, ctx.sourcePath, resolvedBlock.contextConfig);
+					const standardizedPrompt = buildStandardizedPrompt(
+						resolvedBlock.prompt,
+						promptContext,
+						dependencies.getSettings().globalInstructions,
+					);
+					const cacheKey = buildCacheKey(
+						standardizedPrompt,
+						resolvedBlock.template,
+						resolvedBlock.overrides,
+						resolvedBlock.contextConfig,
+					);
 
 				statusEl.setText(
 					`Running ${resolvedBlock.template.name || resolvedBlock.template.id} (${resolvedBlock.template.provider})...`,
@@ -219,12 +259,14 @@ function resolveBlockRequest(source: string, dependencies: AgentBlockDependencie
 		template,
 		prompt: instructionParts.join('\n\n'),
 		overrides: directives.overrides,
+		contextConfig: applyContextOverrides(template.context, directives.contextOverrides),
 	};
 }
 
 function extractBlockDirectives(lines: string[]): {
 	templateId: string | null;
 	overrides: AgentBlockOverrides;
+	contextOverrides: BlockContextOverrides;
 	instructionsStartIndex: number;
 } {
 	let index = 0;
@@ -234,6 +276,7 @@ function extractBlockDirectives(lines: string[]): {
 
 	let templateId: string | null = null;
 	const overrides: AgentBlockOverrides = {};
+	const contextOverrides: BlockContextOverrides = {};
 
 	while (index < lines.length) {
 		const line = lines[index] ?? '';
@@ -345,12 +388,91 @@ function extractBlockDirectives(lines: string[]): {
 			continue;
 		}
 
+		const linkedEnabledMatch = CONTEXT_LINKED_ENABLED_REGEX.exec(trimmed);
+		if (linkedEnabledMatch) {
+			contextOverrides.linkedNoteContent = {
+				...contextOverrides.linkedNoteContent,
+				enabled: parseBooleanDirective(
+					linkedEnabledMatch[2],
+					'Linked content override must be true or false. Use: linked_content: true',
+				),
+			};
+			index += 1;
+			continue;
+		}
+
+		const linkedMaxNotesMatch = CONTEXT_LINKED_MAX_NOTES_REGEX.exec(trimmed);
+		if (linkedMaxNotesMatch) {
+			contextOverrides.linkedNoteContent = {
+				...contextOverrides.linkedNoteContent,
+				maxNotes: parseIntegerDirective(
+					linkedMaxNotesMatch[2],
+					'Linked content max notes must be an integer. Use: linked_content_max_notes: 5',
+				),
+			};
+			index += 1;
+			continue;
+		}
+
+		const linkedMaxCharsMatch = CONTEXT_LINKED_MAX_CHARS_REGEX.exec(trimmed);
+		if (linkedMaxCharsMatch) {
+			contextOverrides.linkedNoteContent = {
+				...contextOverrides.linkedNoteContent,
+				maxCharsPerNote: parseIntegerDirective(
+					linkedMaxCharsMatch[2],
+					'Linked content max chars must be an integer. Use: linked_content_max_chars: 2000',
+				),
+			};
+			index += 1;
+			continue;
+		}
+
+		const linkedSelectionMatch = CONTEXT_LINKED_SELECTION_REGEX.exec(trimmed);
+		if (linkedSelectionMatch) {
+			contextOverrides.linkedNoteContent = {
+				...contextOverrides.linkedNoteContent,
+				selectionMode: parseLinkedSelectionDirective(
+					linkedSelectionMatch[2],
+					'Linked selection override must be "recently-modified" or "recently-created". Use: linked_content_selection: recently-created',
+				),
+			};
+			index += 1;
+			continue;
+		}
+
+		const linkedIncludeOutgoingMatch = CONTEXT_LINKED_INCLUDE_OUTGOING_REGEX.exec(trimmed);
+		if (linkedIncludeOutgoingMatch) {
+			contextOverrides.linkedNoteContent = {
+				...contextOverrides.linkedNoteContent,
+				includeOutgoingLinks: parseBooleanDirective(
+					linkedIncludeOutgoingMatch[2],
+					'Linked outgoing override must be true or false. Use: linked_content_include_outgoing: true',
+				),
+			};
+			index += 1;
+			continue;
+		}
+
+		const linkedIncludeBacklinksMatch = CONTEXT_LINKED_INCLUDE_BACKLINKS_REGEX.exec(trimmed);
+		if (linkedIncludeBacklinksMatch) {
+			contextOverrides.linkedNoteContent = {
+				...contextOverrides.linkedNoteContent,
+				includeBacklinks: parseBooleanDirective(
+					linkedIncludeBacklinksMatch[2],
+					'Linked backlinks override must be true or false. Use: linked_content_include_backlinks: false',
+				),
+			};
+			index += 1;
+			continue;
+		}
+
 		break;
 	}
 
 	return {
 		templateId,
 		overrides,
+		contextOverrides,
 		instructionsStartIndex: index,
 	};
 }
@@ -390,12 +512,92 @@ function parseBooleanDirective(value: string | undefined, message: string): bool
 	throw new Error(message);
 }
 
-function buildCacheKey(prompt: string, template: AgentTemplate, overrides: AgentBlockOverrides): string {
+function parseLinkedSelectionDirective(value: string | undefined, message: string): LinkedNoteSelectionMode {
+	const normalized = (value ?? '').trim().toLowerCase();
+	if (normalized === 'recently-modified') {
+		return 'recently-modified';
+	}
+	if (normalized === 'recently-created') {
+		return 'recently-created';
+	}
+	throw new Error(message);
+}
+
+function applyContextOverrides(
+	baseContext: AgentTemplateContextConfig,
+	overrides: BlockContextOverrides,
+): AgentTemplateContextConfig {
+	const linkedOverrides = overrides.linkedNoteContent ?? {};
+	return {
+		linkedNoteContent: {
+			selectionMode: normalizeLinkedSelectionMode(
+				linkedOverrides.selectionMode ?? baseContext.linkedNoteContent.selectionMode,
+			),
+			enabled: typeof linkedOverrides.enabled === 'boolean'
+				? linkedOverrides.enabled
+				: baseContext.linkedNoteContent.enabled,
+			maxNotes: normalizeLinkedMaxNotes(linkedOverrides.maxNotes ?? baseContext.linkedNoteContent.maxNotes),
+			maxCharsPerNote: normalizeLinkedMaxChars(
+				linkedOverrides.maxCharsPerNote ?? baseContext.linkedNoteContent.maxCharsPerNote,
+			),
+			includeOutgoingLinks: typeof linkedOverrides.includeOutgoingLinks === 'boolean'
+				? linkedOverrides.includeOutgoingLinks
+				: baseContext.linkedNoteContent.includeOutgoingLinks,
+			includeBacklinks: typeof linkedOverrides.includeBacklinks === 'boolean'
+				? linkedOverrides.includeBacklinks
+				: baseContext.linkedNoteContent.includeBacklinks,
+		},
+	};
+}
+
+function normalizeLinkedMaxNotes(value: number): number {
+	if (!Number.isFinite(value)) {
+		return 5;
+	}
+	if (value < 0) {
+		return 0;
+	}
+	if (value > 50) {
+		return 50;
+	}
+	return Math.round(value);
+}
+
+function normalizeLinkedMaxChars(value: number): number {
+	if (!Number.isFinite(value)) {
+		return 2000;
+	}
+	if (value < 200) {
+		return 200;
+	}
+	if (value > 100_000) {
+		return 100_000;
+	}
+	return Math.round(value);
+}
+
+function normalizeLinkedSelectionMode(value: string): LinkedNoteSelectionMode {
+	if (value === 'recently-created') {
+		return 'recently-created';
+	}
+	if (value === 'recently-modified') {
+		return 'recently-modified';
+	}
+	return 'recently-modified';
+}
+
+function buildCacheKey(
+	prompt: string,
+	template: AgentTemplate,
+	overrides: AgentBlockOverrides,
+	contextConfig: AgentTemplateContextConfig,
+): string {
 	const payload = JSON.stringify({
 		prompt,
 		templateId: template.id,
 		provider: template.provider,
 		templateConfig: template.providerConfig,
+		contextConfig,
 		overrides: {
 			model: overrides.model ?? null,
 			reasoningEffort: overrides.reasoningEffort ?? null,
@@ -430,14 +632,23 @@ async function renderAgentResponse(
 	await MarkdownRenderer.render(plugin.app, response, outputEl, sourcePath, renderChild);
 }
 
-function buildPromptContext(plugin: Plugin, sourcePath: string): PromptContext {
+async function buildPromptContext(
+	plugin: Plugin,
+	sourcePath: string,
+	contextConfig: AgentTemplateContextConfig,
+): Promise<PromptContext> {
 	const vaultRootPath = getVaultRootPath(plugin);
+	const currentNote = await getCurrentNoteContent(plugin, sourcePath);
+	const linkedNoteSnapshots = await getLinkedNoteSnapshots(plugin, sourcePath, contextConfig.linkedNoteContent);
 	return {
 		vaultRootPath,
 		currentFilePath: getAbsoluteFilePath(vaultRootPath, sourcePath),
 		currentFileVaultPath: sourcePath || '(current file path unavailable)',
-		outgoingLinks: getOutgoingLinks(plugin, sourcePath),
-		backlinks: getBacklinks(plugin, sourcePath),
+		currentNoteContent: currentNote.content,
+		currentNoteAvailable: currentNote.available,
+		linkedNoteSnapshots,
+		linkedNoteContentEnabled: contextConfig.linkedNoteContent.enabled,
+		linkedNoteSelectionMode: contextConfig.linkedNoteContent.selectionMode,
 	};
 }
 
@@ -460,21 +671,6 @@ function getAbsoluteFilePath(vaultRootPath: string, sourcePath: string): string 
 	return path.join(vaultRootPath, normalizedSourcePath);
 }
 
-function getOutgoingLinks(plugin: Plugin, sourcePath: string): string[] {
-	const resolved = plugin.app.metadataCache.resolvedLinks[sourcePath] ?? {};
-	const unresolved = plugin.app.metadataCache.unresolvedLinks[sourcePath] ?? {};
-
-	const links = new Set<string>();
-	for (const targetPath of Object.keys(resolved)) {
-		links.add(targetPath);
-	}
-	for (const unresolvedTarget of Object.keys(unresolved)) {
-		links.add(`${unresolvedTarget} (unresolved)`);
-	}
-
-	return [...links].sort((a, b) => a.localeCompare(b));
-}
-
 function getBacklinks(plugin: Plugin, sourcePath: string): string[] {
 	if (!sourcePath) {
 		return [];
@@ -489,16 +685,234 @@ function getBacklinks(plugin: Plugin, sourcePath: string): string[] {
 	return [...backlinks].sort((a, b) => a.localeCompare(b));
 }
 
+async function getCurrentNoteContent(
+	plugin: Plugin,
+	sourcePath: string,
+): Promise<{ content: string; available: boolean }> {
+	if (!sourcePath) {
+		return {
+			content: 'Current note path is unavailable.',
+			available: false,
+		};
+	}
+
+	const abstractFile = plugin.app.vault.getAbstractFileByPath(sourcePath);
+	if (!(abstractFile instanceof TFile)) {
+		return {
+			content: `Current note "${sourcePath}" could not be resolved.`,
+			available: false,
+		};
+	}
+
+	try {
+		const content = await plugin.app.vault.cachedRead(abstractFile);
+		return {
+			content: normalizeLinkedContent(content),
+			available: true,
+		};
+	} catch {
+		return {
+			content: `Current note "${sourcePath}" could not be read.`,
+			available: false,
+		};
+	}
+}
+
+async function getLinkedNoteSnapshots(
+	plugin: Plugin,
+	sourcePath: string,
+	config: LinkedNoteContentContextConfig,
+): Promise<LinkedNoteSnapshot[]> {
+	if (!config.enabled || config.maxNotes < 1) {
+		return [];
+	}
+
+	const relationshipByPath = new Map<string, { outgoing: boolean; backlink: boolean }>();
+	if (config.includeOutgoingLinks) {
+		for (const linkPath of getOutgoingLinkCandidates(plugin, sourcePath)) {
+			const linkedFile = resolveLinkedMarkdownFile(plugin, linkPath, sourcePath);
+			if (!linkedFile) {
+				continue;
+			}
+			const existing = relationshipByPath.get(linkedFile.path) ?? { outgoing: false, backlink: false };
+			existing.outgoing = true;
+			relationshipByPath.set(linkedFile.path, existing);
+		}
+	}
+	if (config.includeBacklinks) {
+		for (const linkPath of getBacklinks(plugin, sourcePath)) {
+			const linkedFile = resolveLinkedMarkdownFile(plugin, linkPath, sourcePath);
+			if (!linkedFile) {
+				continue;
+			}
+			const existing = relationshipByPath.get(linkedFile.path) ?? { outgoing: false, backlink: false };
+			existing.backlink = true;
+			relationshipByPath.set(linkedFile.path, existing);
+		}
+	}
+
+	relationshipByPath.delete(sourcePath);
+	const candidateFiles = [...relationshipByPath.keys()]
+		.map((linkedPath) => resolveLinkedMarkdownFile(plugin, linkedPath, sourcePath))
+		.filter((file): file is TFile => file !== null);
+	const fileSystemAdapter = getFileSystemAdapter(plugin);
+	const candidates = await Promise.all(candidateFiles.map(async (file) => ({
+		file,
+		createdTimestamp: await getCreatedTimestamp(fileSystemAdapter, file),
+	})));
+	candidates.sort((a, b) => compareLinkedNoteCandidates(a, b, config.selectionMode));
+	const snapshots: LinkedNoteSnapshot[] = [];
+
+	for (const candidate of candidates) {
+		if (snapshots.length >= config.maxNotes) {
+			break;
+		}
+		const candidateFile = candidate.file;
+		const linkedPath = candidateFile.path;
+
+		try {
+			const rawContent = await plugin.app.vault.cachedRead(candidateFile);
+			const normalizedContent = normalizeLinkedContent(rawContent);
+			if (!normalizedContent.trim()) {
+				continue;
+			}
+
+			const trimmedContent = normalizedContent.slice(0, config.maxCharsPerNote);
+			const wasTruncated = normalizedContent.length > config.maxCharsPerNote;
+			const relationship = relationshipByPath.get(linkedPath) ?? { outgoing: false, backlink: false };
+			snapshots.push({
+				path: linkedPath,
+				relationship: getRelationshipLabel(relationship),
+				createdDate: formatXmlDate(candidate.createdTimestamp),
+				modifiedDate: formatXmlDate(candidateFile.stat.mtime),
+				content: trimmedContent,
+				wasTruncated,
+			});
+		} catch {
+			// Skip unreadable files without failing the block.
+		}
+	}
+
+	return snapshots;
+}
+
+function resolveLinkedMarkdownFile(plugin: Plugin, linkPath: string, sourcePath: string): TFile | null {
+	const direct = plugin.app.vault.getAbstractFileByPath(linkPath);
+	if (direct instanceof TFile && direct.extension === 'md') {
+		return direct;
+	}
+
+	if (!linkPath.endsWith('.md')) {
+		const withMd = plugin.app.vault.getAbstractFileByPath(`${linkPath}.md`);
+		if (withMd instanceof TFile && withMd.extension === 'md') {
+			return withMd;
+		}
+	}
+
+	const resolved = plugin.app.metadataCache.getFirstLinkpathDest(linkPath, sourcePath);
+	if (resolved instanceof TFile && resolved.extension === 'md') {
+		return resolved;
+	}
+
+	if (linkPath.endsWith('.md')) {
+		const withoutExt = linkPath.slice(0, -3);
+		const resolvedWithoutExt = plugin.app.metadataCache.getFirstLinkpathDest(withoutExt, sourcePath);
+		if (resolvedWithoutExt instanceof TFile && resolvedWithoutExt.extension === 'md') {
+			return resolvedWithoutExt;
+		}
+	}
+
+	return null;
+}
+
+function compareLinkedNoteCandidates(
+	a: LinkedNoteCandidate,
+	b: LinkedNoteCandidate,
+	mode: LinkedNoteSelectionMode,
+): number {
+	if (mode === 'recently-created') {
+		const byCreatedTimestamp = b.createdTimestamp - a.createdTimestamp;
+		if (byCreatedTimestamp !== 0) {
+			return byCreatedTimestamp;
+		}
+	}
+
+	const byMtime = b.file.stat.mtime - a.file.stat.mtime;
+	if (byMtime !== 0) {
+		return byMtime;
+	}
+
+	return a.file.path.localeCompare(b.file.path);
+}
+
+function getOutgoingLinkCandidates(plugin: Plugin, sourcePath: string): string[] {
+	const resolved = plugin.app.metadataCache.resolvedLinks[sourcePath] ?? {};
+	const unresolved = plugin.app.metadataCache.unresolvedLinks[sourcePath] ?? {};
+	const candidates = new Set<string>();
+	for (const path of Object.keys(resolved)) {
+		candidates.add(path);
+	}
+	for (const path of Object.keys(unresolved)) {
+		candidates.add(path);
+	}
+	return [...candidates];
+}
+
+function normalizeLinkedContent(content: string): string {
+	return content.replace(/\r\n/g, '\n');
+}
+
+function getRelationshipLabel(relationship: { outgoing: boolean; backlink: boolean }): LinkedNoteSnapshot['relationship'] {
+	if (relationship.outgoing && relationship.backlink) {
+		return 'outgoing+backlink';
+	}
+	if (relationship.backlink) {
+		return 'backlink';
+	}
+	return 'outgoing';
+}
+
+function getFileSystemAdapter(plugin: Plugin): FileSystemAdapter | null {
+	const adapter = plugin.app.vault.adapter;
+	if (adapter instanceof FileSystemAdapter) {
+		return adapter;
+	}
+	return null;
+}
+
+async function getCreatedTimestamp(fileSystemAdapter: FileSystemAdapter | null, file: TFile): Promise<number> {
+	if (fileSystemAdapter) {
+		const normalizedFilePath = file.path.split('/').join(path.sep);
+		const absoluteFilePath = path.join(fileSystemAdapter.getBasePath(), normalizedFilePath);
+		try {
+			const fileStats = await stat(absoluteFilePath);
+			if (Number.isFinite(fileStats.birthtimeMs) && fileStats.birthtimeMs > 0) {
+				return fileStats.birthtimeMs;
+			}
+		} catch {
+			// Fall back to Obsidian metadata.
+		}
+	}
+
+	if (Number.isFinite(file.stat.ctime) && file.stat.ctime > 0) {
+		return file.stat.ctime;
+	}
+	if (Number.isFinite(file.stat.mtime) && file.stat.mtime > 0) {
+		return file.stat.mtime;
+	}
+	return 0;
+}
+
 function buildStandardizedPrompt(
 	userInstruction: string,
 	context: PromptContext,
 	globalInstructions: string,
 ): string {
 	const trimmedGlobalInstructions = globalInstructions.trim();
+	const instructionText = userInstruction.trim();
 
 	return [
-		'You are an agent running inside an Obsidian plugin block.',
-		'Use the context below to fulfill the instruction exactly.',
+		'<response_contract>',
 		'Start the response with a concise Markdown H4 title derived from the instruction.',
 		'Use Obsidian-flavored Markdown where useful (wikilinks, headings, lists, callouts, tables).',
 		'When summarizing, preserve and include relevant Obsidian note links, especially existing [[Note Links]].',
@@ -509,37 +923,64 @@ function buildStandardizedPrompt(
 		'Do not include any reasoning, hidden thoughts, tool usage, skill usage, skill selection, or process commentary.',
 		'Never mention skills, capabilities, or internal workflow details in the output.',
 		'If completion is blocked, return only a short issue message.',
-		'',
-		'Context:',
-		`- Vault root path: ${context.vaultRootPath}`,
-		`- Current file path: ${context.currentFilePath}`,
-		`- Current file vault path: ${context.currentFileVaultPath}`,
-		'- Outgoing links:',
-		formatLinkList(context.outgoingLinks),
-		'- Backlinks:',
-		formatLinkList(context.backlinks),
-		'',
+		'</response_contract>',
+		'<context>',
+		'  <environment>',
+		`    <vault_root_path>${escapeXml(context.vaultRootPath)}</vault_root_path>`,
+		`    <current_file_path>${escapeXml(context.currentFilePath)}</current_file_path>`,
+		`    <current_file_vault_path>${escapeXml(context.currentFileVaultPath)}</current_file_vault_path>`,
+		'  </environment>',
+		`  <current_note available="${context.currentNoteAvailable ? 'true' : 'false'}">`,
+		escapeXml(context.currentNoteContent),
+		'  </current_note>',
+		`  <linked_note_content enabled="${context.linkedNoteContentEnabled ? 'true' : 'false'}" selection_mode="${escapeXml(context.linkedNoteSelectionMode)}">`,
+		context.linkedNoteSnapshots.length > 0
+			? formatLinkedNoteSnapshots(context.linkedNoteSnapshots)
+			: 'No linked notes were loaded.',
+		'  </linked_note_content>',
+		'</context>',
 		...(trimmedGlobalInstructions
 			? [
-				'Global instructions:',
 				'<global_instructions>',
-				trimmedGlobalInstructions,
+				escapeXml(trimmedGlobalInstructions),
 				'</global_instructions>',
-				'',
 			]
 			: []),
-		'User instruction:',
-		'<instruction>',
-		userInstruction.trim(),
-		'</instruction>',
+		'<instructions>',
+		escapeXml(instructionText),
+		'</instructions>',
 	].join('\n');
 }
 
-function formatLinkList(links: string[]): string {
-	if (links.length === 0) {
-		return '- None';
+function formatLinkedNoteSnapshots(snapshots: LinkedNoteSnapshot[]): string {
+	return snapshots
+		.map((snapshot) => [
+			`    <linked_note path="${escapeXml(snapshot.path)}" relationship="${escapeXml(snapshot.relationship)}" created_date="${escapeXml(snapshot.createdDate)}" modified_date="${escapeXml(snapshot.modifiedDate)}" truncated="${snapshot.wasTruncated ? 'true' : 'false'}">`,
+			escapeXml(snapshot.content),
+			'    </linked_note>',
+		].join('\n'))
+		.join('\n\n');
+}
+
+function formatXmlDate(value: number): string {
+	if (!Number.isFinite(value) || value <= 0) {
+		return '';
 	}
-	return links.map((link) => `- ${link}`).join('\n');
+	const date = new Date(value);
+	if (Number.isNaN(date.getTime())) {
+		return '';
+	}
+	return date.toISOString().slice(0, 10);
+}
+
+function escapeXml(value: string): string {
+	return value
+		.split('&')
+		.join('&amp;')
+		.split('<')
+		.join('&lt;')
+		.split('>')
+		.join('&gt;');
 }
 
 function formatBlockDuration(durationMs: number): string {

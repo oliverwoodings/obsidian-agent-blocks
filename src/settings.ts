@@ -43,10 +43,26 @@ export interface OllamaAgentProviderConfig {
 	keepAlive: string;
 }
 
+export interface LinkedNoteContentContextConfig {
+	selectionMode: LinkedNoteSelectionMode;
+	enabled: boolean;
+	maxNotes: number;
+	maxCharsPerNote: number;
+	includeOutgoingLinks: boolean;
+	includeBacklinks: boolean;
+}
+
+export type LinkedNoteSelectionMode = 'recently-modified' | 'recently-created';
+
+export interface AgentTemplateContextConfig {
+	linkedNoteContent: LinkedNoteContentContextConfig;
+}
+
 interface AgentTemplateBase {
 	id: string;
 	name: string;
 	instructions: string;
+	context: AgentTemplateContextConfig;
 }
 
 export interface CodexAgentTemplate extends AgentTemplateBase {
@@ -88,6 +104,17 @@ export const DEFAULT_OLLAMA_PROVIDER_CONFIG: OllamaAgentProviderConfig = {
 	keepAlive: '5m',
 };
 
+export const DEFAULT_TEMPLATE_CONTEXT_CONFIG: AgentTemplateContextConfig = {
+	linkedNoteContent: {
+		selectionMode: 'recently-modified',
+		enabled: false,
+		maxNotes: 5,
+		maxCharsPerNote: 2000,
+		includeOutgoingLinks: true,
+		includeBacklinks: false,
+	},
+};
+
 export const DEFAULT_SETTINGS: AgentBlocksSettings = {
 	globalInstructions: '',
 	agentTemplates: [createDefaultCodexAgentTemplate('default-agent')],
@@ -107,6 +134,9 @@ const REASONING_OPTIONS: Array<{ value: string; label: string }> = [
 export class AgentSettingTab extends PluginSettingTab {
 	plugin: AgentBlocksPlugin;
 	private readonly expandedTemplateIds = new Set<string>();
+	private executionLogCountSetting: Setting | null = null;
+	private executionLogContainerEl: HTMLElement | null = null;
+	private logRefreshTimeoutId: number | null = null;
 
 	constructor(app: App, plugin: AgentBlocksPlugin) {
 		super(app, plugin);
@@ -116,6 +146,12 @@ export class AgentSettingTab extends PluginSettingTab {
 	display(): void {
 		const { containerEl } = this;
 		containerEl.empty();
+		this.executionLogCountSetting = null;
+		this.executionLogContainerEl = null;
+		if (this.logRefreshTimeoutId !== null) {
+			window.clearTimeout(this.logRefreshTimeoutId);
+			this.logRefreshTimeoutId = null;
+		}
 
 		new Setting(containerEl)
 			.setName('Agent blocks')
@@ -156,7 +192,7 @@ export class AgentSettingTab extends PluginSettingTab {
 			.setName('Agent templates')
 			.setHeading();
 		containerEl.createEl('p', {
-			text: 'Use `template: your-template-id` in a block to reference a template.',
+			text: 'Use `template: your-template-id` in a block. Context overrides can use `linked_content` and `linked_content_max_notes` directives.',
 			cls: 'agent-settings-help',
 		});
 
@@ -185,7 +221,7 @@ export class AgentSettingTab extends PluginSettingTab {
 			.setName('Execution log')
 			.setHeading();
 
-		new Setting(containerEl)
+		this.executionLogCountSetting = new Setting(containerEl)
 			.setName('Log entries')
 			.setDesc(`${this.plugin.settings.executionLog.length} saved.`)
 			.addButton((button) => button
@@ -193,10 +229,11 @@ export class AgentSettingTab extends PluginSettingTab {
 				.onClick(async () => {
 					this.plugin.settings.executionLog = [];
 					await this.plugin.saveSettings();
-					this.display();
+					this.refreshExecutionLogSection();
 				}));
 
-		renderExecutionLog(containerEl, this.plugin.settings.executionLog);
+		this.executionLogContainerEl = containerEl.createDiv({ cls: 'agent-execution-log-section' });
+		renderExecutionLog(this.executionLogContainerEl, this.plugin.settings.executionLog);
 
 		new Setting(containerEl)
 			.setName('Prompt cache')
@@ -212,6 +249,35 @@ export class AgentSettingTab extends PluginSettingTab {
 					await this.plugin.saveSettings();
 					this.display();
 				}));
+	}
+
+	notifyExecutionLogUpdated(): void {
+		if (!this.containerEl.isConnected) {
+			return;
+		}
+
+		if (this.logRefreshTimeoutId !== null) {
+			return;
+		}
+
+		this.logRefreshTimeoutId = window.setTimeout(() => {
+			this.logRefreshTimeoutId = null;
+			this.refreshExecutionLogSection();
+		}, 200);
+	}
+
+	private refreshExecutionLogSection(): void {
+		if (!this.containerEl.isConnected) {
+			return;
+		}
+
+		this.executionLogCountSetting?.setDesc(`${this.plugin.settings.executionLog.length} saved.`);
+		if (!this.executionLogContainerEl) {
+			return;
+		}
+
+		this.executionLogContainerEl.empty();
+		renderExecutionLog(this.executionLogContainerEl, this.plugin.settings.executionLog);
 	}
 
 	private renderTemplateEditor(containerEl: HTMLElement, template: AgentTemplate, index: number): void {
@@ -323,6 +389,12 @@ export class AgentSettingTab extends PluginSettingTab {
 				});
 			});
 
+		this.renderContextSettings(templateContainer, template);
+
+		new Setting(templateContainer)
+			.setName('Provider')
+			.setHeading();
+
 		if (template.provider === 'codex') {
 			this.renderCodexProviderSettings(templateContainer, template);
 		} else {
@@ -426,6 +498,76 @@ export class AgentSettingTab extends PluginSettingTab {
 				}));
 	}
 
+	private renderContextSettings(containerEl: HTMLElement, template: AgentTemplate): void {
+		new Setting(containerEl)
+			.setName('Context sources')
+			.setHeading();
+
+		new Setting(containerEl)
+			.setName('Include linked note content')
+			.setDesc('Include selected linked notes in the prompt context.')
+			.addToggle((toggle) => toggle
+				.setValue(template.context.linkedNoteContent.enabled)
+				.onChange(async (value) => {
+					template.context.linkedNoteContent.enabled = value;
+					await this.plugin.saveSettings();
+				}));
+
+		new Setting(containerEl)
+			.setName('Linked note max count')
+			.setDesc('Maximum linked notes to include in prompt context.')
+			.addText((text) => text
+				.setPlaceholder('5')
+				.setValue(String(template.context.linkedNoteContent.maxNotes))
+				.onChange(async (value) => {
+					template.context.linkedNoteContent.maxNotes = normalizeLinkedMaxNotes(value);
+					await this.plugin.saveSettings();
+				}));
+
+		new Setting(containerEl)
+			.setName('Linked note selection')
+			.setDesc('How linked notes are selected when there are more than the max count.')
+			.addDropdown((dropdown) => dropdown
+				.addOption('recently-modified', 'Recently modified')
+				.addOption('recently-created', 'Recently created')
+				.setValue(template.context.linkedNoteContent.selectionMode)
+				.onChange(async (value: LinkedNoteSelectionMode) => {
+					template.context.linkedNoteContent.selectionMode = normalizeLinkedSelectionMode(value);
+					await this.plugin.saveSettings();
+				}));
+
+		new Setting(containerEl)
+			.setName('Linked note max chars')
+			.setDesc('Maximum characters to include per linked note.')
+			.addText((text) => text
+				.setPlaceholder('2000')
+				.setValue(String(template.context.linkedNoteContent.maxCharsPerNote))
+				.onChange(async (value) => {
+					template.context.linkedNoteContent.maxCharsPerNote = normalizeLinkedMaxChars(value);
+					await this.plugin.saveSettings();
+				}));
+
+		new Setting(containerEl)
+			.setName('Include outgoing links')
+			.setDesc('Allows outgoing links to be included as linked note content.')
+			.addToggle((toggle) => toggle
+				.setValue(template.context.linkedNoteContent.includeOutgoingLinks)
+				.onChange(async (value) => {
+					template.context.linkedNoteContent.includeOutgoingLinks = value;
+					await this.plugin.saveSettings();
+				}));
+
+		new Setting(containerEl)
+			.setName('Include backlinks')
+			.setDesc('Allows backlinks to be included as linked note content.')
+			.addToggle((toggle) => toggle
+				.setValue(template.context.linkedNoteContent.includeBacklinks)
+				.onChange(async (value) => {
+					template.context.linkedNoteContent.includeBacklinks = value;
+					await this.plugin.saveSettings();
+				}));
+	}
+
 	private renderOllamaProviderSettings(containerEl: HTMLElement, template: OllamaAgentTemplate): void {
 		new Setting(containerEl)
 			.setName('Ollama host')
@@ -490,6 +632,7 @@ export function createDefaultCodexAgentTemplate(id: string): CodexAgentTemplate 
 		name: 'Default codex agent',
 		provider: 'codex',
 		instructions: '',
+		context: createDefaultTemplateContextConfig(),
 		providerConfig: { ...DEFAULT_CODEX_PROVIDER_CONFIG },
 	};
 }
@@ -500,6 +643,7 @@ export function createDefaultOllamaAgentTemplate(id: string): OllamaAgentTemplat
 		name: 'Default ollama agent',
 		provider: 'ollama',
 		instructions: '',
+		context: createDefaultTemplateContextConfig(),
 		providerConfig: { ...DEFAULT_OLLAMA_PROVIDER_CONFIG },
 	};
 }
@@ -525,6 +669,7 @@ export function convertTemplateProvider(template: AgentTemplate, provider: Agent
 			id: template.id,
 			name: template.name,
 			instructions: template.instructions,
+			context: { ...template.context, linkedNoteContent: { ...template.context.linkedNoteContent } },
 			provider: 'codex',
 			providerConfig: { ...DEFAULT_CODEX_PROVIDER_CONFIG },
 		};
@@ -534,6 +679,7 @@ export function convertTemplateProvider(template: AgentTemplate, provider: Agent
 		id: template.id,
 		name: template.name,
 		instructions: template.instructions,
+		context: { ...template.context, linkedNoteContent: { ...template.context.linkedNoteContent } },
 		provider: 'ollama',
 		providerConfig: { ...DEFAULT_OLLAMA_PROVIDER_CONFIG },
 	};
@@ -549,6 +695,7 @@ function duplicateTemplate(template: AgentTemplate, templates: AgentTemplate[]):
 			id,
 			name,
 			instructions: template.instructions,
+			context: { ...template.context, linkedNoteContent: { ...template.context.linkedNoteContent } },
 			provider: 'codex',
 			providerConfig: { ...template.providerConfig },
 		};
@@ -558,6 +705,7 @@ function duplicateTemplate(template: AgentTemplate, templates: AgentTemplate[]):
 		id,
 		name,
 		instructions: template.instructions,
+		context: { ...template.context, linkedNoteContent: { ...template.context.linkedNoteContent } },
 		provider: 'ollama',
 		providerConfig: { ...template.providerConfig },
 	};
@@ -740,6 +888,50 @@ function normalizeNumPredict(value: string): number {
 	}
 	if (parsed > 32768) {
 		return 32768;
+	}
+	return parsed;
+}
+
+export function createDefaultTemplateContextConfig(): AgentTemplateContextConfig {
+	return {
+		linkedNoteContent: { ...DEFAULT_TEMPLATE_CONTEXT_CONFIG.linkedNoteContent },
+	};
+}
+
+function normalizeLinkedMaxNotes(value: string): number {
+	const parsed = Number.parseInt(value.trim(), 10);
+	if (!Number.isFinite(parsed)) {
+		return DEFAULT_TEMPLATE_CONTEXT_CONFIG.linkedNoteContent.maxNotes;
+	}
+	if (parsed < 0) {
+		return 0;
+	}
+	if (parsed > 50) {
+		return 50;
+	}
+	return parsed;
+}
+
+function normalizeLinkedSelectionMode(value: string): LinkedNoteSelectionMode {
+	if (value === 'recently-created') {
+		return 'recently-created';
+	}
+	if (value === 'recently-modified') {
+		return 'recently-modified';
+	}
+	return DEFAULT_TEMPLATE_CONTEXT_CONFIG.linkedNoteContent.selectionMode;
+}
+
+function normalizeLinkedMaxChars(value: string): number {
+	const parsed = Number.parseInt(value.trim(), 10);
+	if (!Number.isFinite(parsed)) {
+		return DEFAULT_TEMPLATE_CONTEXT_CONFIG.linkedNoteContent.maxCharsPerNote;
+	}
+	if (parsed < 200) {
+		return 200;
+	}
+	if (parsed > 100_000) {
+		return 100_000;
 	}
 	return parsed;
 }
