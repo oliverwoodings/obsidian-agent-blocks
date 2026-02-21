@@ -1,138 +1,95 @@
-# Obsidian Codex CLI Tools
+# Obsidian Agent Blocks
 
-Render Codex CLI responses directly inside notes using a custom `codex` Markdown code block.
+Render local LLM output directly inside notes using an `agent` Markdown code block.
 
 ## Features
 
-- Runs a prompt when the note preview is rendered.
-- Supports inline prompts directly in the block.
-- Supports reusable prompt templates configured in plugin settings.
-- Shows a loading state while Codex is running.
-- Renders Codex output as Markdown.
-- Caches responses by hashed prompt so reopening a note can reuse cached output instead of re-running codex.
-- Includes a refresh button on each block to force re-run the prompt and update the cached result.
-- Standardized prompt requests a title derived from the instruction at the top of each response.
-- Standardized prompt encourages Obsidian-flavored Markdown output and preserving relevant wikilinks when summarizing.
-- Stores an execution log in settings with timestamp, origin note, prompt, and response.
-- Stores an execution log in settings with timestamp, origin note, duration, prompt, and response.
-- Shows in-flight requests in the execution log while they are running.
-- Captures and persists streaming process output (stdout/stderr) per run for debugging.
-- Captures the effective command line arguments used for each run in the log browser.
-- Wraps each instruction in a standardized prompt that includes vault path, file path, backlinks, and outgoing links.
-- Supports a settings-level default model with per-block model override.
-- Supports a settings-level default reasoning effort with per-block override.
-- Supports enabling/disabling MCP server usage for plugin-run codex executions.
-- Supports configurable execution timeout in plugin settings.
-- Supports global instructions in plugin settings that are added to every prompt.
+- Runs automatically when the note is rendered.
+- Reusable agent templates with provider-specific configuration.
+- Multiple providers:
+  - Codex CLI
+  - Ollama (local)
+- Loading state and one-click refresh per block.
+- Execution log in settings with:
+  - timestamp
+  - origin note
+  - provider/template
+  - duration
+  - full prompt
+  - full response
+  - command line args
+  - streamed stdout/stderr output
+  - in-flight status
+- Prompt cache (default max size: 1000 entries).
+- Standardized prompt wrapper with Obsidian context:
+  - vault root path
+  - current file path
+  - outgoing links
+  - backlinks
+- Global instructions applied to every run.
+- Per-block provider overrides (for example model, reasoning, temperature, timeout, mcp, local provider).
 
 ## Requirements
 
-- Desktop Obsidian (plugin is desktop-only).
-- `codex` CLI installed and available on your PATH.
+- Desktop Obsidian (`isDesktopOnly: true`).
+- For Codex templates: local `codex` CLI installed.
+- For Ollama templates: local Ollama server and a pulled model.
 
-## Usage
+## Block usage
 
-### 1) Inline prompt
+### Inline instruction (uses default agent template)
 
 ````markdown
-```codex
+```agent
 Summarize this note into 5 action items.
 ```
 ````
 
-### 2) Template reference
-
-Create templates in **Settings → Community plugins → Obsidian Codex CLI Tools**.
-
-Then reference them in a block:
+### Template reference
 
 ````markdown
-```codex
-template: weekly-summary
-```
-````
-
-Optional: add extra instructions under the template line. They are appended to the template prompt.
-
-````markdown
-```codex
+```agent
 template: weekly-summary
 Focus on blockers and decisions.
 ```
 ````
 
-### 3) Model override in a block
-
-Set a plugin-wide default model in settings (`Default model`; leave blank for CLI default), then override per block when needed:
+### Codex overrides in a block
 
 ````markdown
-```codex
+```agent
+template: codex-default
 model: gpt-5-mini
-Summarize this note in 3 bullets.
-```
-````
-
-### 4) Reasoning effort override in a block
-
-Set a plugin-wide default reasoning effort in settings, then override per block when needed:
-
-````markdown
-```codex
 reasoning: low
-Summarize this note in 3 bullets.
+mcp: false
+timeout: 120
+oss: true
+local_provider: ollama
+Summarize only unresolved items.
 ```
 ````
 
-## MCP server setting
-
-Use **Enable MCP servers** in plugin settings to control whether codex runs from this plugin can use configured MCP servers.
-When disabled, the plugin forces all detected configured MCP servers to `enabled=false` for that run.
-
-## Timeout setting
-
-Use **Execution timeout (seconds)** to control how long a codex run can take before it is stopped.
-
-## Global instructions setting
-
-Use **Global instructions** to define reusable instructions that should be prepended to every codex prompt.
-
-You can combine template + model override:
+### Ollama overrides in a block
 
 ````markdown
-```codex
-template: weekly-summary
-model: gpt-5-nano
-Focus on blockers only.
+```agent
+template: local-ollama
+model: llama3.2
+temperature: 0.1
+num_predict: 700
+host: http://127.0.0.1:11434
+Summarize this file.
 ```
 ````
 
-You can also combine reasoning with template/model directives:
+## Codex local model setting
 
-````markdown
-```codex
-template: weekly-summary
-model: gpt-5-mini
-reasoning: minimal
-Focus on blockers only.
-```
-````
+For Codex templates, you can enable:
 
-## Codex CLI arguments
+- `Use local OSS provider` (adds `--oss`)
+- `Local provider` (adds `--local-provider`, e.g. `ollama`, `lmstudio`, `ollama-chat`)
 
-In settings, `Codex arguments` accepts one argument per line.
-
-Default arguments:
-
-- `exec`
-- `--skip-git-repo-check`
-- `--output-last-message`
-- `-`
-
-Argument behavior:
-
-- If an argument contains `{{prompt}}`, that placeholder is replaced with the prompt.
-- Otherwise, if `-` is present, the prompt is sent over stdin.
-- Otherwise, the prompt is appended as the final argument.
+This lets Codex route to a local provider while keeping Codex prompt/tooling behavior.
 
 ## Development
 

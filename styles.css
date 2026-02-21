@@ -1,4 +1,4 @@
-.codex-cli-block {
+.agent-block {
 	border: 1px solid var(--background-modifier-border);
 	border-radius: 8px;
 	padding: 12px;
@@ -6,7 +6,7 @@
 	background: var(--background-secondary);
 }
 
-.codex-cli-block__header {
+.agent-block__header {
 	display: flex;
 	align-items: center;
 	justify-content: space-between;
@@ -14,13 +14,13 @@
 	margin-bottom: 8px;
 }
 
-.codex-cli-block__status {
+.agent-block__status {
 	font-size: var(--font-ui-smaller);
 	color: var(--text-muted);
 	margin-bottom: 0;
 }
 
-.codex-cli-block__refresh {
+.agent-block__refresh {
 	border: 1px solid var(--background-modifier-border);
 	border-radius: 6px;
 	background: var(--background-primary);
@@ -31,17 +31,17 @@
 	cursor: pointer;
 }
 
-.codex-cli-block__refresh:hover:not(:disabled) {
+.agent-block__refresh:hover:not(:disabled) {
 	color: var(--text-normal);
 	border-color: var(--text-muted);
 }
 
-.codex-cli-block__refresh:disabled {
+.agent-block__refresh:disabled {
 	opacity: 0.55;
 	cursor: default;
 }
 
-.codex-cli-block.is-loading .codex-cli-block__status::before {
+.agent-block.is-loading .agent-block__status::before {
 	content: "";
 	display: inline-block;
 	width: 0.85em;
@@ -51,14 +51,14 @@
 	border: 2px solid var(--text-muted);
 	border-top-color: transparent;
 	vertical-align: text-bottom;
-	animation: codex-cli-spin 0.8s linear infinite;
+	animation: agent-block-spin 0.8s linear infinite;
 }
 
-.codex-cli-block__output {
+.agent-block__output {
 	min-height: 1.2em;
 }
 
-.codex-cli-block__error {
+.agent-block__error {
 	white-space: pre-wrap;
 	word-break: break-word;
 	font-family: var(--font-monospace);
@@ -66,51 +66,89 @@
 	color: var(--text-error);
 }
 
-.codex-cli-block.is-error {
+.agent-block.is-error {
 	border-color: var(--text-error);
 }
 
-.codex-template-setting {
-	padding: 12px;
+.agent-template-setting {
 	border: 1px solid var(--background-modifier-border);
 	border-radius: 8px;
 	margin-bottom: 12px;
+	background: var(--background-secondary);
 }
 
-.codex-settings-help {
+.agent-template-setting__summary {
+	cursor: pointer;
+	padding: 10px 12px;
+	font-size: var(--font-ui-small);
+	font-weight: 600;
+}
+
+.agent-template-setting__summary-text {
+	color: var(--text-normal);
+}
+
+.agent-template-setting__content {
+	padding: 0 12px 12px;
+}
+
+.agent-settings-help {
 	margin-top: 0;
 	color: var(--text-muted);
 }
 
-.codex-execution-log {
+.agent-execution-log {
 	display: flex;
 	flex-direction: column;
 	gap: 8px;
 }
 
-.codex-execution-log-item {
+.agent-execution-log-item {
 	border: 1px solid var(--background-modifier-border);
 	border-radius: 8px;
 	padding: 8px 10px;
 	background: var(--background-secondary);
 }
 
-.codex-execution-log-summary {
+.agent-execution-log-summary {
 	cursor: pointer;
 	font-size: var(--font-ui-small);
 }
 
-.codex-execution-log-body {
+.agent-execution-log-body {
 	margin-top: 10px;
 }
 
-.codex-execution-log-label {
+.agent-execution-log-label {
 	font-size: var(--font-ui-small);
 	color: var(--text-muted);
 	margin: 8px 0 4px;
 }
 
-.codex-execution-log-pre {
+.agent-execution-log-label-row {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+}
+
+.agent-execution-log-copy-button {
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 6px;
+	background: var(--background-primary);
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+	line-height: 1;
+	padding: 3px 8px;
+	cursor: pointer;
+}
+
+.agent-execution-log-copy-button:hover {
+	color: var(--text-normal);
+	border-color: var(--text-muted);
+}
+
+.agent-execution-log-pre {
 	white-space: pre-wrap;
 	word-break: break-word;
 	background: var(--background-primary);
@@ -120,17 +158,20 @@
 	max-height: 260px;
 	overflow: auto;
 	margin: 0;
+	user-select: text;
+	-webkit-user-select: text;
+	cursor: text;
 }
 
-.codex-execution-log-error-label {
+.agent-execution-log-error-label {
 	color: var(--text-error);
 }
 
-.codex-execution-log-running-label {
+.agent-execution-log-running-label {
 	color: var(--text-accent);
 }
 
-@keyframes codex-cli-spin {
+@keyframes agent-block-spin {
 	from {
 		transform: rotate(0deg);
 	}

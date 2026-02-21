@@ -3,10 +3,12 @@ import os from 'os';
 import path from 'path';
 import { spawn, type ChildProcessWithoutNullStreams } from 'child_process';
 import process from 'process';
-import type { CodexCliToolsSettings } from './settings';
+import type { AgentBlockOverrides, AgentInvocation, AgentOutputChunk } from '../agent-types';
+import type { CodexAgentProviderConfig } from '../settings';
+import type { AgentProvider, AgentRunRequest, AgentRunResult } from './types';
 
 const PROMPT_PLACEHOLDER = '{{prompt}}';
-const DEFAULT_EXECUTION_TIMEOUT_MS = 5 * 60 * 1000;
+const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000;
 
 interface InvocationPlan {
 	command: string;
@@ -15,73 +17,73 @@ interface InvocationPlan {
 	timeoutMs: number;
 }
 
-interface RunPromptOptions {
-	model?: string | null;
-	reasoningEffort?: string | null;
-	onInvocation?: (invocation: { command: string; args: string[] }) => void;
-	onOutputChunk?: (chunk: { stream: 'stdout' | 'stderr'; text: string }) => void;
-}
-
-export class CodexCliRunner {
+export class CodexCliProvider implements AgentProvider {
 	private readonly runningProcesses = new Set<ChildProcessWithoutNullStreams>();
-	private readonly getSettings: () => CodexCliToolsSettings;
 
-	constructor(getSettings: () => CodexCliToolsSettings) {
-		this.getSettings = getSettings;
-	}
-
-	async runPrompt(prompt: string, options: RunPromptOptions = {}): Promise<string> {
-		const promptText = prompt.trim();
-		if (!promptText) {
-			throw new Error('Prompt is empty. Add content to the codex block or template.');
+	async run(request: AgentRunRequest): Promise<AgentRunResult> {
+		if (request.template.provider !== 'codex') {
+			throw new Error('Codex provider received a non-codex template.');
 		}
 
-		const settings = this.getSettings();
-		const invocation = buildInvocation(
-			settings,
+		const promptText = request.prompt.trim();
+		if (!promptText) {
+			throw new Error('Prompt is empty. Add content to the agent block or template.');
+		}
+
+		const invocation = buildInvocation(request.template.providerConfig, request.overrides, promptText);
+		safelyEmitInvocation(request.onInvocation, {
+			command: invocation.command,
+			args: [...invocation.args],
+		});
+
+		const response = await runProcess(
+			invocation,
 			promptText,
-			options.model ?? null,
-			options.reasoningEffort ?? null,
+			this.runningProcesses,
+			request.onOutputChunk,
 		);
-		safelyEmitInvocation(options.onInvocation, invocation);
-		return runProcess(invocation, promptText, this.runningProcesses, options.onOutputChunk);
+		return { response };
 	}
 
 	dispose(): void {
-		for (const process of this.runningProcesses) {
-			process.kill();
+		for (const processHandle of this.runningProcesses) {
+			processHandle.kill();
 		}
 		this.runningProcesses.clear();
 	}
 }
 
-function parseArguments(argumentText: string): string[] {
-	return argumentText
-		.split(/\r?\n/u)
-		.map((line) => line.trim())
-		.filter((line) => line.length > 0);
-}
-
 function buildInvocation(
-	settings: CodexCliToolsSettings,
+	config: CodexAgentProviderConfig,
+	overrides: AgentBlockOverrides,
 	promptText: string,
-	modelOverride: string | null,
-	reasoningEffortOverride: string | null,
 ): InvocationPlan {
-	const command = settings.codexCommand.trim() || 'codex';
-	const rawArgs = parseArguments(settings.codexArguments);
-	const selectedModel = normalizeModelName(modelOverride) ?? normalizeModelName(settings.defaultModel);
-	const selectedReasoningEffort = normalizeReasoningEffort(reasoningEffortOverride)
-		?? normalizeReasoningEffort(settings.defaultReasoningEffort);
-	const enableMcpServers = settings.enableMcpServers;
-	const timeoutMs = normalizeTimeoutMs(settings.executionTimeoutSeconds);
+	const command = config.command.trim() || 'codex';
+	const rawArgs = parseArguments(config.arguments);
+	const selectedModel = normalizeString(overrides.model) ?? normalizeString(config.model);
+	const selectedReasoningEffort = normalizeString(overrides.reasoningEffort) ?? normalizeString(config.reasoningEffort);
+	const selectedUseOss = typeof overrides.useOssModelProvider === 'boolean'
+		? overrides.useOssModelProvider
+		: config.useOssModelProvider;
+	const selectedLocalProvider = normalizeString(overrides.localProvider) ?? normalizeString(config.localProvider);
+	const enableMcpServers = typeof overrides.mcpEnabled === 'boolean' ? overrides.mcpEnabled : config.enableMcpServers;
+	const timeoutMs = normalizeTimeoutMs(
+		typeof overrides.executionTimeoutSeconds === 'number'
+			? overrides.executionTimeoutSeconds
+			: config.executionTimeoutSeconds,
+	);
 	const configuredMcpServerNames = getConfiguredMcpServerNames(rawArgs);
 
 	const hasPlaceholder = rawArgs.some((arg) => arg.includes(PROMPT_PLACEHOLDER));
 	const argsWithPrompt = rawArgs.map((arg) => arg.split(PROMPT_PLACEHOLDER).join(promptText));
 	const argsWithModel = injectModelArgument(argsWithPrompt, selectedModel);
 	const argsWithReasoning = injectReasoningEffortArgument(argsWithModel, selectedReasoningEffort);
-	const args = injectMcpArguments(argsWithReasoning, enableMcpServers, configuredMcpServerNames);
+	const argsWithLocalProvider = injectLocalProviderArguments(
+		argsWithReasoning,
+		selectedUseOss,
+		selectedLocalProvider,
+	);
+	const args = injectMcpArguments(argsWithLocalProvider, enableMcpServers, configuredMcpServerNames);
 
 	if (hasPlaceholder) {
 		return {
@@ -109,12 +111,27 @@ function buildInvocation(
 	};
 }
 
-function normalizeModelName(model: string | null | undefined): string | null {
-	if (!model) {
+function parseArguments(argumentText: string): string[] {
+	return argumentText
+		.split(/\r?\n/u)
+		.map((line) => line.trim())
+		.filter((line) => line.length > 0);
+}
+
+function normalizeString(value: string | null | undefined): string | null {
+	if (!value) {
 		return null;
 	}
-	const normalized = model.trim();
+	const normalized = value.trim();
 	return normalized.length > 0 ? normalized : null;
+}
+
+function normalizeTimeoutMs(timeoutSeconds: number): number {
+	if (!Number.isFinite(timeoutSeconds)) {
+		return DEFAULT_TIMEOUT_MS;
+	}
+	const clampedSeconds = Math.max(15, Math.min(3600, Math.round(timeoutSeconds)));
+	return clampedSeconds * 1000;
 }
 
 function injectModelArgument(args: string[], model: string | null): string[] {
@@ -132,12 +149,12 @@ function injectModelArgument(args: string[], model: string | null): string[] {
 	return argsWithModel;
 }
 
-function normalizeReasoningEffort(reasoningEffort: string | null | undefined): string | null {
-	if (!reasoningEffort) {
-		return null;
-	}
-	const normalized = reasoningEffort.trim();
-	return normalized.length > 0 ? normalized : null;
+function hasModelArgument(args: string[]): boolean {
+	return args.some((arg, index) => (
+		arg === '--model'
+		|| arg.startsWith('--model=')
+		|| (arg === '-m' && index < args.length - 1)
+	));
 }
 
 function injectReasoningEffortArgument(args: string[], reasoningEffort: string | null): string[] {
@@ -156,12 +173,50 @@ function injectReasoningEffortArgument(args: string[], reasoningEffort: string |
 	return argsWithReasoning;
 }
 
-function hasModelArgument(args: string[]): boolean {
-	return args.some((arg, index) => (
-		arg === '--model'
-		|| arg.startsWith('--model=')
-		|| (arg === '-m' && index < args.length - 1)
-	));
+function injectLocalProviderArguments(
+	args: string[],
+	useOssModelProvider: boolean,
+	localProvider: string | null,
+): string[] {
+	if (!useOssModelProvider && !localProvider) {
+		return args;
+	}
+
+	const explicitLocalProvider = localProvider ?? null;
+	const useOss = useOssModelProvider || explicitLocalProvider !== null;
+	const argsWithoutLocalProvider = stripLocalProviderArguments(args);
+	const argsWithLocalProvider = [...argsWithoutLocalProvider];
+	let insertionIndex = 0;
+	const firstArg = argsWithLocalProvider[0];
+	if (firstArg && !firstArg.startsWith('-')) {
+		insertionIndex = 1;
+	}
+	if (useOss) {
+		argsWithLocalProvider.splice(insertionIndex, 0, '--oss');
+		insertionIndex += 1;
+	}
+	if (explicitLocalProvider) {
+		argsWithLocalProvider.splice(insertionIndex, 0, '--local-provider', explicitLocalProvider);
+	}
+	return argsWithLocalProvider;
+}
+
+function stripReasoningConfigOverrides(args: string[]): string[] {
+	const strippedArgs: string[] = [];
+	for (let index = 0; index < args.length; index += 1) {
+		const arg = args[index];
+		if ((arg === '-c' || arg === '--config') && index + 1 < args.length) {
+			const value = args[index + 1];
+			if (value && value.trim().startsWith('model_reasoning_effort')) {
+				index += 1;
+				continue;
+			}
+		}
+		if (arg) {
+			strippedArgs.push(arg);
+		}
+	}
+	return strippedArgs;
 }
 
 function injectMcpArguments(
@@ -207,48 +262,6 @@ function formatTomlPathSegment(segment: string): string {
 	return `"${escaped}"`;
 }
 
-function stripMcpConfigOverrides(args: string[]): string[] {
-	const strippedArgs: string[] = [];
-	for (let index = 0; index < args.length; index += 1) {
-		const arg = args[index];
-		if ((arg === '-c' || arg === '--config') && index + 1 < args.length) {
-			const value = args[index + 1];
-			if (value && isMcpConfigOverride(value)) {
-				index += 1;
-				continue;
-			}
-		}
-		strippedArgs.push(arg ?? '');
-	}
-	return strippedArgs;
-}
-
-function isMcpConfigOverride(value: string): boolean {
-	const trimmed = value.trim();
-	return trimmed.startsWith('mcp_servers');
-}
-
-function stripReasoningConfigOverrides(args: string[]): string[] {
-	const strippedArgs: string[] = [];
-	for (let index = 0; index < args.length; index += 1) {
-		const arg = args[index];
-		if ((arg === '-c' || arg === '--config') && index + 1 < args.length) {
-			const value = args[index + 1];
-			if (value && isReasoningConfigOverride(value)) {
-				index += 1;
-				continue;
-			}
-		}
-		strippedArgs.push(arg ?? '');
-	}
-	return strippedArgs;
-}
-
-function isReasoningConfigOverride(value: string): boolean {
-	const trimmed = value.trim();
-	return trimmed.startsWith('model_reasoning_effort');
-}
-
 function formatTomlString(value: string): string {
 	const escaped = value
 		.split('\\')
@@ -256,6 +269,45 @@ function formatTomlString(value: string): string {
 		.split('"')
 		.join('\\"');
 	return `"${escaped}"`;
+}
+
+function stripMcpConfigOverrides(args: string[]): string[] {
+	const strippedArgs: string[] = [];
+	for (let index = 0; index < args.length; index += 1) {
+		const arg = args[index];
+		if ((arg === '-c' || arg === '--config') && index + 1 < args.length) {
+			const value = args[index + 1];
+			if (value && value.trim().startsWith('mcp_servers')) {
+				index += 1;
+				continue;
+			}
+		}
+		if (arg) {
+			strippedArgs.push(arg);
+		}
+	}
+	return strippedArgs;
+}
+
+function stripLocalProviderArguments(args: string[]): string[] {
+	const strippedArgs: string[] = [];
+	for (let index = 0; index < args.length; index += 1) {
+		const arg = args[index];
+		if (arg === '--oss') {
+			continue;
+		}
+		if ((arg === '--local-provider' || arg === '--local_provider') && index + 1 < args.length) {
+			index += 1;
+			continue;
+		}
+		if ((arg?.startsWith('--local-provider=') ?? false) || (arg?.startsWith('--local_provider=') ?? false)) {
+			continue;
+		}
+		if (arg) {
+			strippedArgs.push(arg);
+		}
+	}
+	return strippedArgs;
 }
 
 function getConfiguredMcpServerNames(rawArgs: string[]): string[] {
@@ -331,19 +383,11 @@ function getCodexConfigPath(): string {
 	return path.join(os.homedir(), '.codex', 'config.toml');
 }
 
-function normalizeTimeoutMs(timeoutSeconds: number): number {
-	if (!Number.isFinite(timeoutSeconds)) {
-		return DEFAULT_EXECUTION_TIMEOUT_MS;
-	}
-	const clampedSeconds = Math.max(15, Math.min(3600, Math.round(timeoutSeconds)));
-	return clampedSeconds * 1000;
-}
-
 function runProcess(
 	invocation: InvocationPlan,
 	promptText: string,
 	runningProcesses: Set<ChildProcessWithoutNullStreams>,
-	onOutputChunk?: (chunk: { stream: 'stdout' | 'stderr'; text: string }) => void,
+	onOutputChunk?: (chunk: AgentOutputChunk) => void,
 ): Promise<string> {
 	const commandCandidates = buildCommandCandidates(invocation.command);
 	let candidateIndex = 0;
@@ -364,7 +408,7 @@ function runProcess(
 			runningProcesses.add(childProcess);
 			let timedOut = false;
 			let settled = false;
-			const timeoutHandle = window.setTimeout(() => {
+			const timeoutHandle = globalThis.setTimeout(() => {
 				timedOut = true;
 				childProcess.kill();
 			}, invocation.timeoutMs);
@@ -375,19 +419,13 @@ function runProcess(
 			childProcess.stdout.on('data', (chunk: unknown) => {
 				const text = chunkToString(chunk);
 				stdout += text;
-				safelyEmitOutputChunk(onOutputChunk, {
-					stream: 'stdout',
-					text,
-				});
+				safelyEmitOutputChunk(onOutputChunk, { stream: 'stdout', text });
 			});
 
 			childProcess.stderr.on('data', (chunk: unknown) => {
 				const text = chunkToString(chunk);
 				stderr += text;
-				safelyEmitOutputChunk(onOutputChunk, {
-					stream: 'stderr',
-					text,
-				});
+				safelyEmitOutputChunk(onOutputChunk, { stream: 'stderr', text });
 			});
 
 			childProcess.on('error', (error: unknown) => {
@@ -395,7 +433,7 @@ function runProcess(
 					return;
 				}
 				settled = true;
-				window.clearTimeout(timeoutHandle);
+				globalThis.clearTimeout(timeoutHandle);
 				runningProcesses.delete(childProcess);
 				if (isCommandNotFoundError(error) && candidateIndex + 1 < commandCandidates.length) {
 					candidateIndex += 1;
@@ -411,7 +449,7 @@ function runProcess(
 					return;
 				}
 				settled = true;
-				window.clearTimeout(timeoutHandle);
+				globalThis.clearTimeout(timeoutHandle);
 				runningProcesses.delete(childProcess);
 				if (timedOut) {
 					reject(new Error(buildTimeoutMessage(invocation.timeoutMs)));
@@ -475,8 +513,7 @@ function isCommandNotFoundError(error: unknown): boolean {
 
 function buildStartFailureMessage(requestedCommand: string, triedCommands: string[], error: unknown): string {
 	const message = error instanceof Error ? error.message : String(error);
-	const isNotFound = isCommandNotFoundError(error);
-	if (!isNotFound) {
+	if (!isCommandNotFoundError(error)) {
 		return `Failed to start Codex command "${requestedCommand}": ${message}`;
 	}
 
@@ -484,7 +521,7 @@ function buildStartFailureMessage(requestedCommand: string, triedCommands: strin
 	return [
 		`Failed to start Codex command "${requestedCommand}" (not found).`,
 		`Tried: ${tried}.`,
-		'Set an absolute binary path in plugin settings under "Codex command".',
+		'Set an absolute binary path in your codex template settings.',
 	].join(' ');
 }
 
@@ -499,8 +536,8 @@ function chunkToString(chunk: unknown): string {
 }
 
 function safelyEmitOutputChunk(
-	onOutputChunk: ((chunk: { stream: 'stdout' | 'stderr'; text: string }) => void) | undefined,
-	chunk: { stream: 'stdout' | 'stderr'; text: string },
+	onOutputChunk: ((chunk: AgentOutputChunk) => void) | undefined,
+	chunk: AgentOutputChunk,
 ): void {
 	if (!onOutputChunk || !chunk.text) {
 		return;
@@ -513,17 +550,14 @@ function safelyEmitOutputChunk(
 }
 
 function safelyEmitInvocation(
-	onInvocation: ((invocation: { command: string; args: string[] }) => void) | undefined,
-	invocation: { command: string; args: string[] },
+	onInvocation: ((invocation: AgentInvocation) => void) | undefined,
+	invocation: AgentInvocation,
 ): void {
 	if (!onInvocation) {
 		return;
 	}
 	try {
-		onInvocation({
-			command: invocation.command,
-			args: [...invocation.args],
-		});
+		onInvocation(invocation);
 	} catch {
 		// Invocation logging must not break execution.
 	}

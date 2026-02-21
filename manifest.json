@@ -1,9 +1,9 @@
 {
-	"id": "obsidian-codex-cli-tools",
-	"name": "Obsidian Codex CLI Tools",
+	"id": "obsidian-agent-blocks",
+	"name": "Obsidian Agent Blocks",
 	"version": "1.0.0",
 	"minAppVersion": "0.15.0",
-	"description": "Render Codex CLI prompt output inside Obsidian markdown blocks.",
+	"description": "Render local agent output in Obsidian markdown blocks using Codex CLI or Ollama.",
 	"author": "Obsidian",
 	"authorUrl": "https://obsidian.md",
 	"fundingUrl": "https://obsidian.md/pricing",
