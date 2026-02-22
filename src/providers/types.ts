@@ -1,5 +1,5 @@
 import type { AgentBlockOverrides, AgentInvocation, AgentOutputChunk } from '../agent-types';
-import type { AgentTemplate } from '../settings';
+import type { AgentTemplate } from '../domain/types';
 
 export interface AgentRunRequest {
 	template: AgentTemplate;

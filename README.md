@@ -136,6 +136,73 @@ For Codex templates, you can enable:
 
 This lets Codex route to a local provider while keeping Codex prompt/tooling behavior.
 
+## Architecture
+
+This project is split into layers so behavior is easier to change safely.
+
+### Folder map
+
+- `src/main.ts`
+  - Plugin entrypoint and composition root.
+  - Wires services and registers the `agent` code block processor.
+- `src/domain/`
+  - Shared domain model and rules.
+  - `types.ts`: canonical plugin types.
+  - `defaults.ts`: default config values and template factory helpers.
+  - `normalizers.ts`: clamping/normalization logic used across layers.
+  - `template-utils.ts`: template conversion/duplication helpers.
+- `src/core/`
+  - Application services and stateful orchestration.
+  - `settings-migration.ts`: load/migrate/normalize persisted settings.
+  - `agent-runner.ts`: provider execution + cancellation lifecycle.
+  - `execution-log-service.ts`: execution log lifecycle and streamed output formatting.
+  - `prompt-cache.ts`: prompt cache pruning policies.
+  - `process-output.ts`: stdout/stderr stream formatting and truncation.
+- `src/agent-block/`
+  - Runtime pipeline for ` ```agent ` blocks rendered in notes.
+  - `directives.ts`: parse top-of-block directives and produce an execution request.
+  - `context.ts`: gather note/link context.
+  - `prompt.ts`: build standardized wrapped prompt.
+  - `cache.ts`: deterministic cache keys.
+  - `render.ts`: render model response/error into the block.
+  - `dependencies.ts`: runtime contract expected from plugin services.
+  - `safe-dependencies.ts`: wrappers for non-critical dependency calls that should not break rendering.
+- `src/ui/`
+  - Settings UI code.
+  - `ui/settings/agent-setting-tab.ts`: settings tab composition and controls.
+  - `ui/settings/execution-log.ts`: execution log display widgets.
+- `src/providers/`
+  - Provider adapters (`codex-provider.ts`, `ollama-provider.ts`) and provider interface (`types.ts`).
+
+### Dependency direction
+
+Keep imports flowing in this direction:
+
+- `ui`, `agent-block`, `core`, and `providers` can import from `domain`.
+- `main.ts` can import from every layer (composition root).
+- `domain` should not import from `ui`, `core`, or `agent-block`.
+- `providers` should not import settings UI modules.
+- `ui` should not own business rules; it should call shared domain/core helpers.
+
+### Agent block execution flow
+
+1. Obsidian renders an `agent` code block and calls `registerAgentCodeBlockProcessor`.
+2. `agent-block/directives.ts` parses directives and resolves template + overrides.
+3. `agent-block/context.ts` gathers current note + linked note context.
+4. `agent-block/prompt.ts` builds standardized prompt text.
+5. `agent-block/cache.ts` computes cache keys and checks cached responses.
+6. `core/agent-runner.ts` executes the selected provider (`providers/*`).
+7. `core/execution-log-service.ts` records invocation/output lifecycle.
+8. `agent-block/render.ts` renders final markdown response (or error) into the note.
+
+### Adding new code (rules of thumb)
+
+- Add or change shared data shape/rules in `domain`.
+- Add orchestration/stateful process logic in `core`.
+- Add note-render runtime behavior in `agent-block`.
+- Add settings UX only in `ui`.
+- Keep `main.ts` small and focused on wiring.
+
 ## Development
 
 ```bash

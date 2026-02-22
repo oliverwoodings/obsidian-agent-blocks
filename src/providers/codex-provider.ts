@@ -4,7 +4,7 @@ import path from 'path';
 import { spawn, type ChildProcessWithoutNullStreams } from 'child_process';
 import process from 'process';
 import type { AgentBlockOverrides, AgentInvocation, AgentOutputChunk } from '../agent-types';
-import type { CodexAgentProviderConfig } from '../settings';
+import type { CodexAgentProviderConfig } from '../domain/types';
 import type { AgentProvider, AgentRunRequest, AgentRunResult } from './types';
 
 const PROMPT_PLACEHOLDER = '{{prompt}}';

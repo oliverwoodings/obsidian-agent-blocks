@@ -1,5 +1,5 @@
 import type { AgentBlockOverrides, AgentInvocation, AgentOutputChunk } from '../agent-types';
-import type { OllamaAgentProviderConfig } from '../settings';
+import type { OllamaAgentProviderConfig } from '../domain/types';
 import { requestUrl } from 'obsidian';
 import type { AgentProvider, AgentRunRequest, AgentRunResult } from './types';
 
