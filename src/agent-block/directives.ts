@@ -122,7 +122,7 @@ function extractBlockDirectives(lines: string[]): {
 
 		const modelMatch = MODEL_REFERENCE_REGEX.exec(trimmed);
 		if (modelMatch) {
-			overrides.model = requireNonEmptyValue(modelMatch[2], 'Model override is missing a value. Use: model: gpt-5-mini');
+			overrides.model = requireNonEmptyValue(modelMatch[1], 'Model override is missing a value. Use: model: gpt-5-mini');
 			index += 1;
 			continue;
 		}
@@ -140,7 +140,7 @@ function extractBlockDirectives(lines: string[]): {
 		const temperatureMatch = TEMPERATURE_REFERENCE_REGEX.exec(trimmed);
 		if (temperatureMatch) {
 			overrides.temperature = parseNumberDirective(
-				temperatureMatch[2],
+				temperatureMatch[1],
 				'Temperature override must be a number. Use: temperature: 0.2',
 			);
 			index += 1;
@@ -169,7 +169,7 @@ function extractBlockDirectives(lines: string[]): {
 
 		const hostMatch = HOST_REFERENCE_REGEX.exec(trimmed);
 		if (hostMatch) {
-			overrides.host = requireNonEmptyValue(hostMatch[2], 'Host override is missing a value. Use: host: http://127.0.0.1:11434');
+			overrides.host = requireNonEmptyValue(hostMatch[1], 'Host override is missing a value. Use: host: http://127.0.0.1:11434');
 			index += 1;
 			continue;
 		}
