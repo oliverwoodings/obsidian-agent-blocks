@@ -31,12 +31,12 @@ import type {
 } from '../domain/types';
 import { enforcePromptCacheLimit } from './prompt-cache';
 
-export function migrateAndNormalizeSettings(loadedData: Record<string, unknown> | null): AgentBlocksSettings {
+export function normalizeLoadedSettings(loadedData: Record<string, unknown> | null): AgentBlocksSettings {
 	const loaded = loadedData ?? {};
-	const migratedTemplates = migrateAgentTemplates(loaded);
+	const normalizedTemplates = normalizeAgentTemplates(loaded.agentTemplates);
 	const defaultTemplateId = normalizeDefaultTemplateId(
 		loaded.defaultAgentTemplateId,
-		migratedTemplates,
+		normalizedTemplates,
 	);
 
 	const normalizedLog = normalizeExecutionLog(loaded.executionLog);
@@ -50,7 +50,7 @@ export function migrateAndNormalizeSettings(loadedData: Record<string, unknown> 
 
 	return {
 		globalInstructions: typeof loaded.globalInstructions === 'string' ? loaded.globalInstructions : '',
-		agentTemplates: migratedTemplates,
+		agentTemplates: normalizedTemplates,
 		defaultAgentTemplateId: defaultTemplateId,
 		promptCacheMaxEntries,
 		executionLog: normalizedLog,
@@ -59,47 +59,37 @@ export function migrateAndNormalizeSettings(loadedData: Record<string, unknown> 
 	};
 }
 
-function migrateAgentTemplates(loaded: Record<string, unknown>): AgentTemplate[] {
-	if (Array.isArray(loaded.agentTemplates)) {
-		const normalized = loaded.agentTemplates
-			.map((template) => normalizeAgentTemplate(template))
-			.filter((template): template is AgentTemplate => template !== null);
-		if (normalized.length > 0) {
-			return normalized;
+function normalizeAgentTemplates(value: unknown): AgentTemplate[] {
+	if (!Array.isArray(value)) {
+		return [createDefaultCodexAgentTemplate(DEFAULT_SETTINGS.defaultAgentTemplateId)];
+	}
+
+	const templates: AgentTemplate[] = [];
+	for (const candidate of value) {
+		const normalized = normalizeAgentTemplate(candidate, templates);
+		if (normalized) {
+			templates.push(normalized);
 		}
 	}
 
-	const legacyPromptTemplates = parseLegacyPromptTemplates(loaded.promptTemplates);
-	const legacyCodexConfig = parseLegacyCodexConfig(loaded);
-
-	const migratedFromLegacyTemplates = legacyPromptTemplates.map((legacyTemplate) => ({
-		id: legacyTemplate.id,
-		name: legacyTemplate.name,
-		instructions: legacyTemplate.prompt,
-		cacheMode: 'auto-refresh' as const,
-		context: createDefaultTemplateContextConfig(),
-		provider: 'codex' as const,
-		providerConfig: { ...legacyCodexConfig },
-	}));
-
-	if (migratedFromLegacyTemplates.length > 0) {
-		return migratedFromLegacyTemplates;
+	if (templates.length === 0) {
+		return [createDefaultCodexAgentTemplate(DEFAULT_SETTINGS.defaultAgentTemplateId)];
 	}
 
-	const defaultId = 'default-agent';
-	const defaultTemplate = createDefaultCodexAgentTemplate(defaultId);
-	defaultTemplate.providerConfig = { ...legacyCodexConfig };
-	return [defaultTemplate];
+	return templates;
 }
 
-function normalizeAgentTemplate(value: unknown): AgentTemplate | null {
+function normalizeAgentTemplate(value: unknown, existingTemplates: AgentTemplate[]): AgentTemplate | null {
 	if (!value || typeof value !== 'object') {
 		return null;
 	}
 
 	const raw = value as Record<string, unknown>;
 	const provider = raw.provider === 'ollama' ? 'ollama' : 'codex';
-	const id = typeof raw.id === 'string' && raw.id.trim() ? raw.id.trim() : createTemplateId([]);
+	const candidateId = typeof raw.id === 'string' ? raw.id.trim() : '';
+	const id = candidateId && !existingTemplates.some((template) => template.id === candidateId)
+		? candidateId
+		: createTemplateId(existingTemplates);
 	const name = typeof raw.name === 'string' && raw.name.trim()
 		? raw.name
 		: (provider === 'codex' ? 'Codex agent' : 'Ollama agent');
@@ -132,6 +122,7 @@ function normalizeTemplateContext(value: unknown): AgentTemplateContextConfig {
 	if (!value || typeof value !== 'object') {
 		return createDefaultTemplateContextConfig();
 	}
+
 	const raw = value as Record<string, unknown>;
 	return {
 		linkedNoteContent: normalizeLinkedNoteContentContext(raw.linkedNoteContent),
@@ -142,6 +133,7 @@ function normalizeLinkedNoteContentContext(value: unknown): LinkedNoteContentCon
 	if (!value || typeof value !== 'object') {
 		return createDefaultTemplateContextConfig().linkedNoteContent;
 	}
+
 	const raw = value as Record<string, unknown>;
 	const rawFilters = raw.filters && typeof raw.filters === 'object'
 		? raw.filters as Record<string, unknown>
@@ -159,20 +151,14 @@ function normalizeLinkedNoteContentContext(value: unknown): LinkedNoteContentCon
 		filters: {
 			includeOutgoingLinks: typeof rawFilters?.includeOutgoingLinks === 'boolean'
 				? rawFilters.includeOutgoingLinks
-				: (typeof raw.includeOutgoingLinks === 'boolean'
-					? raw.includeOutgoingLinks
-					: DEFAULT_TEMPLATE_CONTEXT_CONFIG.linkedNoteContent.filters.includeOutgoingLinks),
+				: DEFAULT_TEMPLATE_CONTEXT_CONFIG.linkedNoteContent.filters.includeOutgoingLinks,
 			includeBacklinks: typeof rawFilters?.includeBacklinks === 'boolean'
 				? rawFilters.includeBacklinks
-				: (typeof raw.includeBacklinks === 'boolean'
-					? raw.includeBacklinks
-					: DEFAULT_TEMPLATE_CONTEXT_CONFIG.linkedNoteContent.filters.includeBacklinks),
-			requiredFrontmatterField: normalizeOptionalString(
-				rawFilters?.requiredFrontmatterField ?? raw.requiredFrontmatterField,
-			),
+				: DEFAULT_TEMPLATE_CONTEXT_CONFIG.linkedNoteContent.filters.includeBacklinks,
+			requiredFrontmatterField: normalizeOptionalString(rawFilters?.requiredFrontmatterField),
 		},
 		sort: {
-			field: normalizeLinkedSortField(rawSort?.field ?? raw.selectionMode),
+			field: normalizeLinkedSortField(rawSort?.field),
 			direction: normalizeLinkedSortDirection(rawSort?.direction),
 			frontmatterDateField: normalizeOptionalString(rawSort?.frontmatterDateField),
 		},
@@ -183,6 +169,7 @@ function normalizeCodexConfig(value: unknown): CodexAgentProviderConfig {
 	if (!value || typeof value !== 'object') {
 		return { ...DEFAULT_CODEX_PROVIDER_CONFIG };
 	}
+
 	const raw = value as Record<string, unknown>;
 	return {
 		command: typeof raw.command === 'string' && raw.command.trim()
@@ -208,6 +195,7 @@ function normalizeOllamaConfig(value: unknown): OllamaAgentProviderConfig {
 	if (!value || typeof value !== 'object') {
 		return { ...DEFAULT_OLLAMA_PROVIDER_CONFIG };
 	}
+
 	const raw = value as Record<string, unknown>;
 	return {
 		host: normalizeOptionalString(raw.host) || DEFAULT_OLLAMA_PROVIDER_CONFIG.host,
@@ -222,6 +210,7 @@ function normalizeDefaultTemplateId(defaultId: unknown, templates: AgentTemplate
 	if (typeof defaultId === 'string' && templates.some((template) => template.id === defaultId)) {
 		return defaultId;
 	}
+
 	return templates[0]?.id ?? DEFAULT_SETTINGS.defaultAgentTemplateId;
 }
 
@@ -239,10 +228,12 @@ function normalizeExecutionLogEntry(value: unknown): ExecutionLogEntry | null {
 	if (!value || typeof value !== 'object') {
 		return null;
 	}
+
 	const raw = value as Record<string, unknown>;
-	const status = raw.status === 'running' || raw.status === 'success' || raw.status === 'error' || raw.status === 'stopped'
+	const statusCandidate = raw.status === 'running' || raw.status === 'success' || raw.status === 'error' || raw.status === 'stopped'
 		? raw.status
 		: (raw.wasError ? 'error' : 'success');
+	const status = statusCandidate === 'running' ? 'error' : statusCandidate;
 
 	return {
 		id: typeof raw.id === 'string' ? raw.id : `${Date.now()}-${Math.random().toString(16).slice(2)}`,
@@ -260,7 +251,7 @@ function normalizeExecutionLogEntry(value: unknown): ExecutionLogEntry | null {
 		processOutput: typeof raw.processOutput === 'string' ? raw.processOutput : '',
 		wasError: status === 'error',
 		durationMs: typeof raw.durationMs === 'number' ? raw.durationMs : Number.NaN,
-		status: status === 'running' ? 'error' : status,
+		status,
 	};
 }
 
@@ -289,7 +280,7 @@ function normalizeBlockPromptCacheIndex(
 		return {};
 	}
 
-	const normalized = Object.fromEntries(
+	return Object.fromEntries(
 		Object.entries(value)
 			.filter(([blockId, hash]) => {
 				if (typeof blockId !== 'string' || !blockId.trim()) {
@@ -302,55 +293,4 @@ function normalizeBlockPromptCacheIndex(
 			})
 			.map(([blockId, hash]) => [blockId, (hash as string).trim()]),
 	) as Record<string, string>;
-
-	return normalized;
-}
-
-function parseLegacyPromptTemplates(value: unknown): Array<{ id: string; name: string; prompt: string }> {
-	if (!Array.isArray(value)) {
-		return [];
-	}
-
-	const templates: Array<{ id: string; name: string; prompt: string }> = [];
-	for (const candidate of value) {
-		if (!candidate || typeof candidate !== 'object') {
-			continue;
-		}
-		const raw = candidate as Record<string, unknown>;
-		const id = typeof raw.id === 'string' && raw.id.trim() ? raw.id.trim() : '';
-		if (!id) {
-			continue;
-		}
-		templates.push({
-			id,
-			name: typeof raw.name === 'string' && raw.name.trim() ? raw.name : id,
-			prompt: typeof raw.prompt === 'string' ? raw.prompt : '',
-		});
-	}
-	return templates;
-}
-
-function parseLegacyCodexConfig(loaded: Record<string, unknown>): CodexAgentProviderConfig {
-	return {
-		command: typeof loaded.codexCommand === 'string' && loaded.codexCommand.trim()
-			? loaded.codexCommand.trim()
-			: DEFAULT_CODEX_PROVIDER_CONFIG.command,
-		arguments: typeof loaded.codexArguments === 'string'
-			? loaded.codexArguments
-			: DEFAULT_CODEX_PROVIDER_CONFIG.arguments,
-		model: typeof loaded.defaultModel === 'string' ? loaded.defaultModel.trim() : '',
-		reasoningEffort: typeof loaded.defaultReasoningEffort === 'string' ? loaded.defaultReasoningEffort.trim() : '',
-		useOssModelProvider: typeof loaded.useOssModelProvider === 'boolean'
-			? loaded.useOssModelProvider
-			: (typeof loaded.codexUseOssModelProvider === 'boolean'
-				? loaded.codexUseOssModelProvider
-				: DEFAULT_CODEX_PROVIDER_CONFIG.useOssModelProvider),
-		localProvider: typeof loaded.localProvider === 'string'
-			? loaded.localProvider.trim()
-			: (typeof loaded.codexLocalProvider === 'string' ? loaded.codexLocalProvider.trim() : ''),
-		executionTimeoutSeconds: normalizeTimeoutSeconds(loaded.executionTimeoutSeconds),
-		enableMcpServers: typeof loaded.enableMcpServers === 'boolean'
-			? loaded.enableMcpServers
-			: DEFAULT_CODEX_PROVIDER_CONFIG.enableMcpServers,
-	};
 }

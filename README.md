@@ -153,7 +153,7 @@ This project is split into layers so behavior is easier to change safely.
   - `template-utils.ts`: template conversion/duplication helpers.
 - `src/core/`
   - Application services and stateful orchestration.
-  - `settings-migration.ts`: load/migrate/normalize persisted settings.
+  - `settings-normalization.ts`: load and normalize persisted settings.
   - `agent-runner.ts`: provider execution + cancellation lifecycle.
   - `execution-log-service.ts`: execution log lifecycle and streamed output formatting.
   - `prompt-cache.ts`: prompt cache pruning policies.

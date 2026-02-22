@@ -4,8 +4,6 @@
 	"version": "1.0.0",
 	"minAppVersion": "0.15.0",
 	"description": "Render local agent output in Obsidian markdown blocks using Codex CLI or Ollama.",
-	"author": "Obsidian",
-	"authorUrl": "https://obsidian.md",
-	"fundingUrl": "https://obsidian.md/pricing",
+	"author": "Oliver Woodings",
 	"isDesktopOnly": true
 }

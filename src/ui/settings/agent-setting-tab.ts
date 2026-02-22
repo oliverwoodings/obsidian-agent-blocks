@@ -62,18 +62,20 @@ export class AgentSettingTab extends PluginSettingTab {
 			this.logRefreshTimeoutId = null;
 		}
 
-		new Setting(containerEl)
+		const globalInstructionsSetting = new Setting(containerEl)
 			.setName('Global instructions')
 			.setDesc('Additional instructions applied to every agent prompt.')
 			.addTextArea((text) => {
 				text.setPlaceholder('Keep output concise and use Obsidian wikilinks.');
 				text.setValue(this.plugin.settings.globalInstructions);
-				text.inputEl.rows = 4;
+				text.inputEl.rows = 8;
+				text.inputEl.addClass('agent-template-instructions-input');
 				text.onChange(async (value) => {
 					this.plugin.settings.globalInstructions = value;
 					await this.plugin.saveSettings();
 				});
 			});
+		globalInstructionsSetting.settingEl.addClass('agent-template-instructions-setting');
 
 		new Setting(containerEl)
 			.setName('Default agent template')

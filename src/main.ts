@@ -3,7 +3,7 @@ import { registerAgentCodeBlockProcessor } from './agent-block';
 import { AgentRunner, type AgentExecutionRequest } from './core/agent-runner';
 import { ExecutionLogService } from './core/execution-log-service';
 import { enforcePromptCacheLimit, pruneBlockPromptCacheIndex } from './core/prompt-cache';
-import { migrateAndNormalizeSettings } from './core/settings-migration';
+import { normalizeLoadedSettings } from './core/settings-normalization';
 import { normalizePromptCacheMaxEntries } from './domain/normalizers';
 import type { AgentBlocksSettings, AgentTemplate } from './domain/types';
 import { CodexCliProvider } from './providers/codex-provider';
@@ -54,7 +54,7 @@ export default class AgentBlocksPlugin extends Plugin {
 
 	async loadSettings(): Promise<void> {
 		const loaded = await this.loadData() as Record<string, unknown> | null;
-		this.settings = migrateAndNormalizeSettings(loaded);
+		this.settings = normalizeLoadedSettings(loaded);
 	}
 
 	async saveSettings(): Promise<void> {

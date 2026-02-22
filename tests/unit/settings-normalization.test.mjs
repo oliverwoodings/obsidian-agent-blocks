@@ -3,10 +3,10 @@ import test from 'node:test';
 import { loadTs } from '../helpers/load-ts.mjs';
 import { createBaseTemplate } from '../helpers/fixtures.mjs';
 
-const { migrateAndNormalizeSettings } = loadTs('../../src/core/settings-migration.ts');
+const { normalizeLoadedSettings } = loadTs('../../src/core/settings-normalization.ts');
 
-test('migrateAndNormalizeSettings returns defaults for null input', () => {
-	const settings = migrateAndNormalizeSettings(null);
+test('normalizeLoadedSettings returns defaults for null input', () => {
+	const settings = normalizeLoadedSettings(null);
 
 	assert.equal(settings.agentTemplates.length, 1);
 	assert.equal(settings.defaultAgentTemplateId, 'default-agent');
@@ -14,27 +14,21 @@ test('migrateAndNormalizeSettings returns defaults for null input', () => {
 	assert.deepEqual(settings.promptCache, {});
 });
 
-test('migrateAndNormalizeSettings migrates legacy prompt templates and codex config', () => {
-	const settings = migrateAndNormalizeSettings({
+test('normalizeLoadedSettings ignores legacy-only fields when current schema is missing', () => {
+	const settings = normalizeLoadedSettings({
 		promptTemplates: [{ id: 'legacy-1', name: 'Legacy One', prompt: 'Legacy instructions' }],
 		codexCommand: '/custom/codex',
-		codexArguments: 'exec\n-',
-		defaultModel: 'gpt-5-mini',
-		enableMcpServers: false,
 	});
 
 	assert.equal(settings.agentTemplates.length, 1);
-	assert.equal(settings.agentTemplates[0].id, 'legacy-1');
-	assert.equal(settings.agentTemplates[0].instructions, 'Legacy instructions');
+	assert.equal(settings.agentTemplates[0].id, 'default-agent');
 	assert.equal(settings.agentTemplates[0].provider, 'codex');
-	assert.equal(settings.agentTemplates[0].providerConfig.command, '/custom/codex');
-	assert.equal(settings.agentTemplates[0].providerConfig.model, 'gpt-5-mini');
-	assert.equal(settings.agentTemplates[0].providerConfig.enableMcpServers, false);
+	assert.equal(settings.agentTemplates[0].providerConfig.command, 'codex');
 });
 
-test('migrateAndNormalizeSettings normalizes stale running log entries and prunes cache index', () => {
+test('normalizeLoadedSettings normalizes stale running log entries and prunes cache index', () => {
 	const template = createBaseTemplate();
-	const settings = migrateAndNormalizeSettings({
+	const settings = normalizeLoadedSettings({
 		agentTemplates: [template],
 		defaultAgentTemplateId: template.id,
 		executionLog: [{
@@ -63,6 +57,6 @@ test('migrateAndNormalizeSettings normalizes stale running log entries and prune
 	});
 
 	assert.equal(settings.executionLog[0].status, 'error');
-	assert.equal(settings.executionLog[0].wasError, false);
+	assert.equal(settings.executionLog[0].wasError, true);
 	assert.deepEqual(settings.blockPromptCacheIndex, { A: 'keep' });
 });
