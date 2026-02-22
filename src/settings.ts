@@ -44,15 +44,27 @@ export interface OllamaAgentProviderConfig {
 }
 
 export interface LinkedNoteContentContextConfig {
-	selectionMode: LinkedNoteSelectionMode;
 	enabled: boolean;
 	maxNotes: number;
 	maxCharsPerNote: number;
-	includeOutgoingLinks: boolean;
-	includeBacklinks: boolean;
+	filters: LinkedNoteFiltersConfig;
+	sort: LinkedNoteSortConfig;
 }
 
-export type LinkedNoteSelectionMode = 'recently-modified' | 'recently-created';
+export interface LinkedNoteFiltersConfig {
+	includeOutgoingLinks: boolean;
+	includeBacklinks: boolean;
+	requiredFrontmatterField: string;
+}
+
+export interface LinkedNoteSortConfig {
+	field: LinkedNoteSortField;
+	direction: LinkedNoteSortDirection;
+	frontmatterDateField: string;
+}
+
+export type LinkedNoteSortField = 'modified-date' | 'created-date' | 'frontmatter-date';
+export type LinkedNoteSortDirection = 'descending' | 'ascending';
 
 export interface AgentTemplateContextConfig {
 	linkedNoteContent: LinkedNoteContentContextConfig;
@@ -106,12 +118,19 @@ export const DEFAULT_OLLAMA_PROVIDER_CONFIG: OllamaAgentProviderConfig = {
 
 export const DEFAULT_TEMPLATE_CONTEXT_CONFIG: AgentTemplateContextConfig = {
 	linkedNoteContent: {
-		selectionMode: 'recently-modified',
 		enabled: false,
 		maxNotes: 5,
 		maxCharsPerNote: 2000,
-		includeOutgoingLinks: true,
-		includeBacklinks: false,
+		filters: {
+			includeOutgoingLinks: true,
+			includeBacklinks: false,
+			requiredFrontmatterField: '',
+		},
+		sort: {
+			field: 'modified-date',
+			direction: 'descending',
+			frontmatterDateField: '',
+		},
 	},
 };
 
@@ -192,7 +211,7 @@ export class AgentSettingTab extends PluginSettingTab {
 			.setName('Agent templates')
 			.setHeading();
 		containerEl.createEl('p', {
-			text: 'Use `template: your-template-id` in a block. Context overrides can use `linked_content` and `linked_content_max_notes` directives.',
+			text: 'Use `template: your-template-id` in a block. Linked-note context can be overridden per block with `linked_content_*` filter and sort directives.',
 			cls: 'agent-settings-help',
 		});
 
@@ -525,18 +544,6 @@ export class AgentSettingTab extends PluginSettingTab {
 				}));
 
 		new Setting(containerEl)
-			.setName('Linked note selection')
-			.setDesc('How linked notes are selected when there are more than the max count.')
-			.addDropdown((dropdown) => dropdown
-				.addOption('recently-modified', 'Recently modified')
-				.addOption('recently-created', 'Recently created')
-				.setValue(template.context.linkedNoteContent.selectionMode)
-				.onChange(async (value: LinkedNoteSelectionMode) => {
-					template.context.linkedNoteContent.selectionMode = normalizeLinkedSelectionMode(value);
-					await this.plugin.saveSettings();
-				}));
-
-		new Setting(containerEl)
 			.setName('Linked note max chars')
 			.setDesc('Maximum characters to include per linked note.')
 			.addText((text) => text
@@ -548,12 +555,16 @@ export class AgentSettingTab extends PluginSettingTab {
 				}));
 
 		new Setting(containerEl)
+			.setName('Linked note filters')
+			.setHeading();
+
+		new Setting(containerEl)
 			.setName('Include outgoing links')
 			.setDesc('Allows outgoing links to be included as linked note content.')
 			.addToggle((toggle) => toggle
-				.setValue(template.context.linkedNoteContent.includeOutgoingLinks)
+				.setValue(template.context.linkedNoteContent.filters.includeOutgoingLinks)
 				.onChange(async (value) => {
-					template.context.linkedNoteContent.includeOutgoingLinks = value;
+					template.context.linkedNoteContent.filters.includeOutgoingLinks = value;
 					await this.plugin.saveSettings();
 				}));
 
@@ -561,9 +572,60 @@ export class AgentSettingTab extends PluginSettingTab {
 			.setName('Include backlinks')
 			.setDesc('Allows backlinks to be included as linked note content.')
 			.addToggle((toggle) => toggle
-				.setValue(template.context.linkedNoteContent.includeBacklinks)
+				.setValue(template.context.linkedNoteContent.filters.includeBacklinks)
 				.onChange(async (value) => {
-					template.context.linkedNoteContent.includeBacklinks = value;
+					template.context.linkedNoteContent.filters.includeBacklinks = value;
+					await this.plugin.saveSettings();
+				}));
+
+		new Setting(containerEl)
+			.setName('Require frontmatter field')
+			.setDesc('Optional. If set, linked notes must contain this frontmatter field to be included.')
+			.addText((text) => text
+				.setPlaceholder('Example: review_date')
+				.setValue(template.context.linkedNoteContent.filters.requiredFrontmatterField)
+				.onChange(async (value) => {
+					template.context.linkedNoteContent.filters.requiredFrontmatterField = value.trim();
+					await this.plugin.saveSettings();
+				}));
+
+		new Setting(containerEl)
+			.setName('Linked note sort')
+			.setHeading();
+
+		new Setting(containerEl)
+			.setName('Sort by')
+			.setDesc('How linked notes are ordered before max-count trimming.')
+			.addDropdown((dropdown) => dropdown
+				.addOption('modified-date', 'Modified date')
+				.addOption('created-date', 'Created date')
+				.addOption('frontmatter-date', 'Frontmatter date field')
+				.setValue(template.context.linkedNoteContent.sort.field)
+				.onChange(async (value: LinkedNoteSortField) => {
+					template.context.linkedNoteContent.sort.field = normalizeLinkedSortField(value);
+					await this.plugin.saveSettings();
+				}));
+
+		new Setting(containerEl)
+			.setName('Sort direction')
+			.setDesc('Descending is newest-first for date sorts.')
+			.addDropdown((dropdown) => dropdown
+				.addOption('descending', 'Descending')
+				.addOption('ascending', 'Ascending')
+				.setValue(template.context.linkedNoteContent.sort.direction)
+				.onChange(async (value: LinkedNoteSortDirection) => {
+					template.context.linkedNoteContent.sort.direction = normalizeLinkedSortDirection(value);
+					await this.plugin.saveSettings();
+				}));
+
+		new Setting(containerEl)
+			.setName('Frontmatter date field')
+			.setDesc('Used when sort by = frontmatter date field. Example: review_date')
+			.addText((text) => text
+				.setPlaceholder('Example: review_date')
+				.setValue(template.context.linkedNoteContent.sort.frontmatterDateField)
+				.onChange(async (value) => {
+					template.context.linkedNoteContent.sort.frontmatterDateField = value.trim();
 					await this.plugin.saveSettings();
 				}));
 	}
@@ -669,7 +731,7 @@ export function convertTemplateProvider(template: AgentTemplate, provider: Agent
 			id: template.id,
 			name: template.name,
 			instructions: template.instructions,
-			context: { ...template.context, linkedNoteContent: { ...template.context.linkedNoteContent } },
+			context: cloneTemplateContext(template.context),
 			provider: 'codex',
 			providerConfig: { ...DEFAULT_CODEX_PROVIDER_CONFIG },
 		};
@@ -679,7 +741,7 @@ export function convertTemplateProvider(template: AgentTemplate, provider: Agent
 		id: template.id,
 		name: template.name,
 		instructions: template.instructions,
-		context: { ...template.context, linkedNoteContent: { ...template.context.linkedNoteContent } },
+		context: cloneTemplateContext(template.context),
 		provider: 'ollama',
 		providerConfig: { ...DEFAULT_OLLAMA_PROVIDER_CONFIG },
 	};
@@ -695,7 +757,7 @@ function duplicateTemplate(template: AgentTemplate, templates: AgentTemplate[]):
 			id,
 			name,
 			instructions: template.instructions,
-			context: { ...template.context, linkedNoteContent: { ...template.context.linkedNoteContent } },
+			context: cloneTemplateContext(template.context),
 			provider: 'codex',
 			providerConfig: { ...template.providerConfig },
 		};
@@ -705,9 +767,29 @@ function duplicateTemplate(template: AgentTemplate, templates: AgentTemplate[]):
 		id,
 		name,
 		instructions: template.instructions,
-		context: { ...template.context, linkedNoteContent: { ...template.context.linkedNoteContent } },
+		context: cloneTemplateContext(template.context),
 		provider: 'ollama',
 		providerConfig: { ...template.providerConfig },
+	};
+}
+
+function cloneTemplateContext(context: AgentTemplateContextConfig): AgentTemplateContextConfig {
+	return {
+		linkedNoteContent: {
+			enabled: context.linkedNoteContent.enabled,
+			maxNotes: context.linkedNoteContent.maxNotes,
+			maxCharsPerNote: context.linkedNoteContent.maxCharsPerNote,
+			filters: {
+				includeOutgoingLinks: context.linkedNoteContent.filters.includeOutgoingLinks,
+				includeBacklinks: context.linkedNoteContent.filters.includeBacklinks,
+				requiredFrontmatterField: context.linkedNoteContent.filters.requiredFrontmatterField,
+			},
+			sort: {
+				field: context.linkedNoteContent.sort.field,
+				direction: context.linkedNoteContent.sort.direction,
+				frontmatterDateField: context.linkedNoteContent.sort.frontmatterDateField,
+			},
+		},
 	};
 }
 
@@ -893,9 +975,7 @@ function normalizeNumPredict(value: string): number {
 }
 
 export function createDefaultTemplateContextConfig(): AgentTemplateContextConfig {
-	return {
-		linkedNoteContent: { ...DEFAULT_TEMPLATE_CONTEXT_CONFIG.linkedNoteContent },
-	};
+	return cloneTemplateContext(DEFAULT_TEMPLATE_CONTEXT_CONFIG);
 }
 
 function normalizeLinkedMaxNotes(value: string): number {
@@ -912,14 +992,27 @@ function normalizeLinkedMaxNotes(value: string): number {
 	return parsed;
 }
 
-function normalizeLinkedSelectionMode(value: string): LinkedNoteSelectionMode {
-	if (value === 'recently-created') {
-		return 'recently-created';
+function normalizeLinkedSortField(value: string): LinkedNoteSortField {
+	if (value === 'created-date') {
+		return 'created-date';
 	}
-	if (value === 'recently-modified') {
-		return 'recently-modified';
+	if (value === 'frontmatter-date') {
+		return 'frontmatter-date';
 	}
-	return DEFAULT_TEMPLATE_CONTEXT_CONFIG.linkedNoteContent.selectionMode;
+	if (value === 'modified-date') {
+		return 'modified-date';
+	}
+	return DEFAULT_TEMPLATE_CONTEXT_CONFIG.linkedNoteContent.sort.field;
+}
+
+function normalizeLinkedSortDirection(value: string): LinkedNoteSortDirection {
+	if (value === 'ascending') {
+		return 'ascending';
+	}
+	if (value === 'descending') {
+		return 'descending';
+	}
+	return DEFAULT_TEMPLATE_CONTEXT_CONFIG.linkedNoteContent.sort.direction;
 }
 
 function normalizeLinkedMaxChars(value: string): number {

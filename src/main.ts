@@ -10,7 +10,8 @@ import {
 	type CodexAgentProviderConfig,
 	type ExecutionLogEntry,
 	type LinkedNoteContentContextConfig,
-	type LinkedNoteSelectionMode,
+	type LinkedNoteSortDirection,
+	type LinkedNoteSortField,
 	type PromptCacheEntry,
 	type OllamaAgentProviderConfig,
 	AgentSettingTab,
@@ -329,37 +330,81 @@ function normalizeTemplateContext(value: unknown): AgentTemplateContextConfig {
 
 function normalizeLinkedNoteContentContext(value: unknown): LinkedNoteContentContextConfig {
 	if (!value || typeof value !== 'object') {
-		return { ...DEFAULT_TEMPLATE_CONTEXT_CONFIG.linkedNoteContent };
+		return createDefaultTemplateContextConfig().linkedNoteContent;
 	}
 	const raw = value as Record<string, unknown>;
+	const rawFilters = raw.filters && typeof raw.filters === 'object'
+		? raw.filters as Record<string, unknown>
+		: null;
+	const rawSort = raw.sort && typeof raw.sort === 'object'
+		? raw.sort as Record<string, unknown>
+		: null;
+
 	return {
-		selectionMode: normalizeLinkedSelectionMode(raw.selectionMode),
 		enabled: typeof raw.enabled === 'boolean'
 			? raw.enabled
 			: DEFAULT_TEMPLATE_CONTEXT_CONFIG.linkedNoteContent.enabled,
 		maxNotes: normalizeLinkedMaxNotes(raw.maxNotes),
 		maxCharsPerNote: normalizeLinkedMaxChars(raw.maxCharsPerNote),
-		includeOutgoingLinks: typeof raw.includeOutgoingLinks === 'boolean'
-			? raw.includeOutgoingLinks
-			: DEFAULT_TEMPLATE_CONTEXT_CONFIG.linkedNoteContent.includeOutgoingLinks,
-		includeBacklinks: typeof raw.includeBacklinks === 'boolean'
-			? raw.includeBacklinks
-			: DEFAULT_TEMPLATE_CONTEXT_CONFIG.linkedNoteContent.includeBacklinks,
+		filters: {
+			includeOutgoingLinks: typeof rawFilters?.includeOutgoingLinks === 'boolean'
+				? rawFilters.includeOutgoingLinks
+				: (typeof raw.includeOutgoingLinks === 'boolean'
+					? raw.includeOutgoingLinks
+					: DEFAULT_TEMPLATE_CONTEXT_CONFIG.linkedNoteContent.filters.includeOutgoingLinks),
+			includeBacklinks: typeof rawFilters?.includeBacklinks === 'boolean'
+				? rawFilters.includeBacklinks
+				: (typeof raw.includeBacklinks === 'boolean'
+					? raw.includeBacklinks
+					: DEFAULT_TEMPLATE_CONTEXT_CONFIG.linkedNoteContent.filters.includeBacklinks),
+			requiredFrontmatterField: normalizeOptionalString(
+				rawFilters?.requiredFrontmatterField ?? raw.requiredFrontmatterField,
+			),
+		},
+		sort: {
+			field: normalizeLinkedSortField(rawSort?.field ?? raw.selectionMode),
+			direction: normalizeLinkedSortDirection(rawSort?.direction),
+			frontmatterDateField: normalizeOptionalString(rawSort?.frontmatterDateField),
+		},
 	};
 }
 
-function normalizeLinkedSelectionMode(value: unknown): LinkedNoteSelectionMode {
+function normalizeLinkedSortField(value: unknown): LinkedNoteSortField {
 	if (typeof value !== 'string') {
-		return DEFAULT_TEMPLATE_CONTEXT_CONFIG.linkedNoteContent.selectionMode;
+		return DEFAULT_TEMPLATE_CONTEXT_CONFIG.linkedNoteContent.sort.field;
 	}
 	const normalized = value.trim().toLowerCase();
-	if (normalized === 'recently-created') {
-		return 'recently-created';
+	if (normalized === 'created-date' || normalized === 'recently-created') {
+		return 'created-date';
 	}
-	if (normalized === 'recently-modified') {
-		return 'recently-modified';
+	if (normalized === 'frontmatter-date') {
+		return 'frontmatter-date';
 	}
-	return DEFAULT_TEMPLATE_CONTEXT_CONFIG.linkedNoteContent.selectionMode;
+	if (normalized === 'modified-date' || normalized === 'recently-modified') {
+		return 'modified-date';
+	}
+	return DEFAULT_TEMPLATE_CONTEXT_CONFIG.linkedNoteContent.sort.field;
+}
+
+function normalizeLinkedSortDirection(value: unknown): LinkedNoteSortDirection {
+	if (typeof value !== 'string') {
+		return DEFAULT_TEMPLATE_CONTEXT_CONFIG.linkedNoteContent.sort.direction;
+	}
+	const normalized = value.trim().toLowerCase();
+	if (normalized === 'ascending') {
+		return 'ascending';
+	}
+	if (normalized === 'descending') {
+		return 'descending';
+	}
+	return DEFAULT_TEMPLATE_CONTEXT_CONFIG.linkedNoteContent.sort.direction;
+}
+
+function normalizeOptionalString(value: unknown): string {
+	if (typeof value !== 'string') {
+		return '';
+	}
+	return value.trim();
 }
 
 function normalizeCodexConfig(value: unknown): CodexAgentProviderConfig {

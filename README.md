@@ -24,10 +24,10 @@ Render local LLM output directly inside notes using an `agent` Markdown code blo
 - Standardized prompt wrapper with Obsidian context:
   - vault root path
   - current file path
-  - outgoing links
-  - backlinks
+  - current note content
+  - optionally selected linked note content
 - Template-configurable context sources (currently linked note content).
-- Per-block context source overrides (enable/disable and sizing).
+- Per-block context source overrides (enable/disable, sizing, filtering, and sorting).
 - Global instructions applied to every run.
 - Per-block provider overrides (for example model, reasoning, temperature, timeout, mcp, local provider).
 
@@ -47,9 +47,14 @@ Summarize this note into 5 action items.
 ```
 ````
 
-`linked_content_selection` supports:
-- `recently-modified` (default)
-- `recently-created`
+`linked_content_sort_by` supports:
+- `modified-date` (default)
+- `created-date`
+- `frontmatter-date`
+
+`linked_content_sort_direction` supports:
+- `descending` (default)
+- `ascending`
 
 ### Template reference
 
@@ -96,9 +101,12 @@ template: fast-summary
 linked_content: true
 linked_content_max_notes: 6
 linked_content_max_chars: 1500
-linked_content_selection: recently-modified
+linked_content_sort_by: frontmatter-date
+linked_content_sort_direction: descending
+linked_content_sort_frontmatter_date_field: review_date
 linked_content_include_outgoing: true
 linked_content_include_backlinks: false
+linked_content_filter_required_frontmatter_field: review_date
 Summarize this note and key linked context.
 ```
 ````

@@ -8,7 +8,10 @@ import type {
 	AgentTemplate,
 	AgentTemplateContextConfig,
 	LinkedNoteContentContextConfig,
-	LinkedNoteSelectionMode,
+	LinkedNoteFiltersConfig,
+	LinkedNoteSortConfig,
+	LinkedNoteSortDirection,
+	LinkedNoteSortField,
 } from './settings';
 
 interface AgentBlockDependencies {
@@ -54,7 +57,12 @@ interface PromptContext {
 	currentNoteAvailable: boolean;
 	linkedNoteSnapshots: LinkedNoteSnapshot[];
 	linkedNoteContentEnabled: boolean;
-	linkedNoteSelectionMode: LinkedNoteSelectionMode;
+	linkedNoteSortField: LinkedNoteSortField;
+	linkedNoteSortDirection: LinkedNoteSortDirection;
+	linkedNoteSortFrontmatterDateField: string;
+	linkedNoteRequiredFrontmatterField: string;
+	linkedNoteIncludeOutgoingLinks: boolean;
+	linkedNoteIncludeBacklinks: boolean;
 }
 
 interface LinkedNoteSnapshot {
@@ -69,10 +77,18 @@ interface LinkedNoteSnapshot {
 interface LinkedNoteCandidate {
 	file: TFile;
 	createdTimestamp: number;
+	sortTimestamp: number | null;
+	frontmatter: Record<string, unknown> | null;
 }
 
 interface BlockContextOverrides {
-	linkedNoteContent?: Partial<LinkedNoteContentContextConfig>;
+	linkedNoteContent?: {
+		enabled?: boolean;
+		maxNotes?: number;
+		maxCharsPerNote?: number;
+		filters?: Partial<LinkedNoteFiltersConfig>;
+		sort?: Partial<LinkedNoteSortConfig>;
+	};
 }
 
 const TEMPLATE_REFERENCE_REGEX = /^(template|use)\s*:\s*(.+)$/iu;
@@ -89,8 +105,12 @@ const LOCAL_PROVIDER_REFERENCE_REGEX = /^(local_provider|codex_local_provider)\s
 const CONTEXT_LINKED_ENABLED_REGEX = /^(context\.linked_note_content\.enabled|linked_content)\s*:\s*(.+)$/iu;
 const CONTEXT_LINKED_MAX_NOTES_REGEX = /^(context\.linked_note_content\.max_notes|linked_content_max_notes)\s*:\s*(.+)$/iu;
 const CONTEXT_LINKED_MAX_CHARS_REGEX = /^(context\.linked_note_content\.max_chars_per_note|linked_content_max_chars)\s*:\s*(.+)$/iu;
-const CONTEXT_LINKED_INCLUDE_OUTGOING_REGEX = /^(context\.linked_note_content\.include_outgoing_links|linked_content_include_outgoing)\s*:\s*(.+)$/iu;
-const CONTEXT_LINKED_INCLUDE_BACKLINKS_REGEX = /^(context\.linked_note_content\.include_backlinks|linked_content_include_backlinks)\s*:\s*(.+)$/iu;
+const CONTEXT_LINKED_INCLUDE_OUTGOING_REGEX = /^(context\.linked_note_content\.filters\.include_outgoing_links|context\.linked_note_content\.include_outgoing_links|linked_content_include_outgoing)\s*:\s*(.+)$/iu;
+const CONTEXT_LINKED_INCLUDE_BACKLINKS_REGEX = /^(context\.linked_note_content\.filters\.include_backlinks|context\.linked_note_content\.include_backlinks|linked_content_include_backlinks)\s*:\s*(.+)$/iu;
+const CONTEXT_LINKED_REQUIRED_FRONTMATTER_FIELD_REGEX = /^(context\.linked_note_content\.filters\.required_frontmatter_field|linked_content_filter_required_frontmatter_field)\s*:\s*(.+)$/iu;
+const CONTEXT_LINKED_SORT_FIELD_REGEX = /^(context\.linked_note_content\.sort\.field|linked_content_sort_by)\s*:\s*(.+)$/iu;
+const CONTEXT_LINKED_SORT_DIRECTION_REGEX = /^(context\.linked_note_content\.sort\.direction|linked_content_sort_direction)\s*:\s*(.+)$/iu;
+const CONTEXT_LINKED_SORT_FRONTMATTER_FIELD_REGEX = /^(context\.linked_note_content\.sort\.frontmatter_date_field|linked_content_sort_frontmatter_date_field)\s*:\s*(.+)$/iu;
 const CONTEXT_LINKED_SELECTION_REGEX = /^(context\.linked_note_content\.selection|linked_content_selection)\s*:\s*(.+)$/iu;
 
 export function registerAgentCodeBlockProcessor(plugin: Plugin, dependencies: AgentBlockDependencies): void {
@@ -431,10 +451,13 @@ function extractBlockDirectives(lines: string[]): {
 		if (linkedSelectionMatch) {
 			contextOverrides.linkedNoteContent = {
 				...contextOverrides.linkedNoteContent,
-				selectionMode: parseLinkedSelectionDirective(
-					linkedSelectionMatch[2],
-					'Linked selection override must be "recently-modified" or "recently-created". Use: linked_content_selection: recently-created',
-				),
+				sort: {
+					...(contextOverrides.linkedNoteContent?.sort ?? {}),
+					field: parseLegacyLinkedSelectionDirective(
+						linkedSelectionMatch[2],
+						'Linked selection override must be "recently-modified" or "recently-created". Use: linked_content_selection: recently-created',
+					),
+				},
 			};
 			index += 1;
 			continue;
@@ -444,10 +467,13 @@ function extractBlockDirectives(lines: string[]): {
 		if (linkedIncludeOutgoingMatch) {
 			contextOverrides.linkedNoteContent = {
 				...contextOverrides.linkedNoteContent,
-				includeOutgoingLinks: parseBooleanDirective(
-					linkedIncludeOutgoingMatch[2],
-					'Linked outgoing override must be true or false. Use: linked_content_include_outgoing: true',
-				),
+				filters: {
+					...(contextOverrides.linkedNoteContent?.filters ?? {}),
+					includeOutgoingLinks: parseBooleanDirective(
+						linkedIncludeOutgoingMatch[2],
+						'Linked outgoing override must be true or false. Use: linked_content_include_outgoing: true',
+					),
+				},
 			};
 			index += 1;
 			continue;
@@ -457,10 +483,71 @@ function extractBlockDirectives(lines: string[]): {
 		if (linkedIncludeBacklinksMatch) {
 			contextOverrides.linkedNoteContent = {
 				...contextOverrides.linkedNoteContent,
-				includeBacklinks: parseBooleanDirective(
-					linkedIncludeBacklinksMatch[2],
-					'Linked backlinks override must be true or false. Use: linked_content_include_backlinks: false',
-				),
+				filters: {
+					...(contextOverrides.linkedNoteContent?.filters ?? {}),
+					includeBacklinks: parseBooleanDirective(
+						linkedIncludeBacklinksMatch[2],
+						'Linked backlinks override must be true or false. Use: linked_content_include_backlinks: false',
+					),
+				},
+			};
+			index += 1;
+			continue;
+		}
+
+		const linkedRequiredFrontmatterFieldMatch = CONTEXT_LINKED_REQUIRED_FRONTMATTER_FIELD_REGEX.exec(trimmed);
+		if (linkedRequiredFrontmatterFieldMatch) {
+			contextOverrides.linkedNoteContent = {
+				...contextOverrides.linkedNoteContent,
+				filters: {
+					...(contextOverrides.linkedNoteContent?.filters ?? {}),
+					requiredFrontmatterField: linkedRequiredFrontmatterFieldMatch[2]?.trim() ?? '',
+				},
+			};
+			index += 1;
+			continue;
+		}
+
+		const linkedSortFieldMatch = CONTEXT_LINKED_SORT_FIELD_REGEX.exec(trimmed);
+		if (linkedSortFieldMatch) {
+			contextOverrides.linkedNoteContent = {
+				...contextOverrides.linkedNoteContent,
+				sort: {
+					...(contextOverrides.linkedNoteContent?.sort ?? {}),
+					field: parseLinkedSortFieldDirective(
+						linkedSortFieldMatch[2],
+						'Linked sort override must be "modified-date", "created-date", or "frontmatter-date". Use: linked_content_sort_by: frontmatter-date',
+					),
+				},
+			};
+			index += 1;
+			continue;
+		}
+
+		const linkedSortDirectionMatch = CONTEXT_LINKED_SORT_DIRECTION_REGEX.exec(trimmed);
+		if (linkedSortDirectionMatch) {
+			contextOverrides.linkedNoteContent = {
+				...contextOverrides.linkedNoteContent,
+				sort: {
+					...(contextOverrides.linkedNoteContent?.sort ?? {}),
+					direction: parseLinkedSortDirectionDirective(
+						linkedSortDirectionMatch[2],
+						'Linked sort direction override must be "descending" or "ascending". Use: linked_content_sort_direction: descending',
+					),
+				},
+			};
+			index += 1;
+			continue;
+		}
+
+		const linkedSortFrontmatterFieldMatch = CONTEXT_LINKED_SORT_FRONTMATTER_FIELD_REGEX.exec(trimmed);
+		if (linkedSortFrontmatterFieldMatch) {
+			contextOverrides.linkedNoteContent = {
+				...contextOverrides.linkedNoteContent,
+				sort: {
+					...(contextOverrides.linkedNoteContent?.sort ?? {}),
+					frontmatterDateField: linkedSortFrontmatterFieldMatch[2]?.trim() ?? '',
+				},
 			};
 			index += 1;
 			continue;
@@ -512,13 +599,38 @@ function parseBooleanDirective(value: string | undefined, message: string): bool
 	throw new Error(message);
 }
 
-function parseLinkedSelectionDirective(value: string | undefined, message: string): LinkedNoteSelectionMode {
+function parseLegacyLinkedSelectionDirective(value: string | undefined, message: string): LinkedNoteSortField {
 	const normalized = (value ?? '').trim().toLowerCase();
 	if (normalized === 'recently-modified') {
-		return 'recently-modified';
+		return 'modified-date';
 	}
 	if (normalized === 'recently-created') {
-		return 'recently-created';
+		return 'created-date';
+	}
+	throw new Error(message);
+}
+
+function parseLinkedSortFieldDirective(value: string | undefined, message: string): LinkedNoteSortField {
+	const normalized = (value ?? '').trim().toLowerCase();
+	if (normalized === 'modified-date') {
+		return 'modified-date';
+	}
+	if (normalized === 'created-date') {
+		return 'created-date';
+	}
+	if (normalized === 'frontmatter-date') {
+		return 'frontmatter-date';
+	}
+	throw new Error(message);
+}
+
+function parseLinkedSortDirectionDirective(value: string | undefined, message: string): LinkedNoteSortDirection {
+	const normalized = (value ?? '').trim().toLowerCase();
+	if (normalized === 'descending') {
+		return 'descending';
+	}
+	if (normalized === 'ascending') {
+		return 'ascending';
 	}
 	throw new Error(message);
 }
@@ -530,9 +642,6 @@ function applyContextOverrides(
 	const linkedOverrides = overrides.linkedNoteContent ?? {};
 	return {
 		linkedNoteContent: {
-			selectionMode: normalizeLinkedSelectionMode(
-				linkedOverrides.selectionMode ?? baseContext.linkedNoteContent.selectionMode,
-			),
 			enabled: typeof linkedOverrides.enabled === 'boolean'
 				? linkedOverrides.enabled
 				: baseContext.linkedNoteContent.enabled,
@@ -540,12 +649,30 @@ function applyContextOverrides(
 			maxCharsPerNote: normalizeLinkedMaxChars(
 				linkedOverrides.maxCharsPerNote ?? baseContext.linkedNoteContent.maxCharsPerNote,
 			),
-			includeOutgoingLinks: typeof linkedOverrides.includeOutgoingLinks === 'boolean'
-				? linkedOverrides.includeOutgoingLinks
-				: baseContext.linkedNoteContent.includeOutgoingLinks,
-			includeBacklinks: typeof linkedOverrides.includeBacklinks === 'boolean'
-				? linkedOverrides.includeBacklinks
-				: baseContext.linkedNoteContent.includeBacklinks,
+			filters: {
+				includeOutgoingLinks: typeof linkedOverrides.filters?.includeOutgoingLinks === 'boolean'
+					? linkedOverrides.filters.includeOutgoingLinks
+					: baseContext.linkedNoteContent.filters.includeOutgoingLinks,
+				includeBacklinks: typeof linkedOverrides.filters?.includeBacklinks === 'boolean'
+					? linkedOverrides.filters.includeBacklinks
+					: baseContext.linkedNoteContent.filters.includeBacklinks,
+				requiredFrontmatterField: normalizeOptionalString(
+					linkedOverrides.filters?.requiredFrontmatterField
+						?? baseContext.linkedNoteContent.filters.requiredFrontmatterField,
+				),
+			},
+			sort: {
+				field: normalizeLinkedSortField(
+					linkedOverrides.sort?.field ?? baseContext.linkedNoteContent.sort.field,
+				),
+				direction: normalizeLinkedSortDirection(
+					linkedOverrides.sort?.direction ?? baseContext.linkedNoteContent.sort.direction,
+				),
+				frontmatterDateField: normalizeOptionalString(
+					linkedOverrides.sort?.frontmatterDateField
+						?? baseContext.linkedNoteContent.sort.frontmatterDateField,
+				),
+			},
 		},
 	};
 }
@@ -576,14 +703,31 @@ function normalizeLinkedMaxChars(value: number): number {
 	return Math.round(value);
 }
 
-function normalizeLinkedSelectionMode(value: string): LinkedNoteSelectionMode {
-	if (value === 'recently-created') {
-		return 'recently-created';
+function normalizeLinkedSortField(value: string): LinkedNoteSortField {
+	if (value === 'created-date') {
+		return 'created-date';
 	}
-	if (value === 'recently-modified') {
-		return 'recently-modified';
+	if (value === 'frontmatter-date') {
+		return 'frontmatter-date';
 	}
-	return 'recently-modified';
+	if (value === 'modified-date') {
+		return 'modified-date';
+	}
+	return 'modified-date';
+}
+
+function normalizeLinkedSortDirection(value: string): LinkedNoteSortDirection {
+	if (value === 'ascending') {
+		return 'ascending';
+	}
+	if (value === 'descending') {
+		return 'descending';
+	}
+	return 'descending';
+}
+
+function normalizeOptionalString(value: string | undefined): string {
+	return (value ?? '').trim();
 }
 
 function buildCacheKey(
@@ -648,7 +792,12 @@ async function buildPromptContext(
 		currentNoteAvailable: currentNote.available,
 		linkedNoteSnapshots,
 		linkedNoteContentEnabled: contextConfig.linkedNoteContent.enabled,
-		linkedNoteSelectionMode: contextConfig.linkedNoteContent.selectionMode,
+		linkedNoteSortField: contextConfig.linkedNoteContent.sort.field,
+		linkedNoteSortDirection: contextConfig.linkedNoteContent.sort.direction,
+		linkedNoteSortFrontmatterDateField: contextConfig.linkedNoteContent.sort.frontmatterDateField,
+		linkedNoteRequiredFrontmatterField: contextConfig.linkedNoteContent.filters.requiredFrontmatterField,
+		linkedNoteIncludeOutgoingLinks: contextConfig.linkedNoteContent.filters.includeOutgoingLinks,
+		linkedNoteIncludeBacklinks: contextConfig.linkedNoteContent.filters.includeBacklinks,
 	};
 }
 
@@ -728,7 +877,7 @@ async function getLinkedNoteSnapshots(
 	}
 
 	const relationshipByPath = new Map<string, { outgoing: boolean; backlink: boolean }>();
-	if (config.includeOutgoingLinks) {
+	if (config.filters.includeOutgoingLinks) {
 		for (const linkPath of getOutgoingLinkCandidates(plugin, sourcePath)) {
 			const linkedFile = resolveLinkedMarkdownFile(plugin, linkPath, sourcePath);
 			if (!linkedFile) {
@@ -739,7 +888,7 @@ async function getLinkedNoteSnapshots(
 			relationshipByPath.set(linkedFile.path, existing);
 		}
 	}
-	if (config.includeBacklinks) {
+	if (config.filters.includeBacklinks) {
 		for (const linkPath of getBacklinks(plugin, sourcePath)) {
 			const linkedFile = resolveLinkedMarkdownFile(plugin, linkPath, sourcePath);
 			if (!linkedFile) {
@@ -756,14 +905,31 @@ async function getLinkedNoteSnapshots(
 		.map((linkedPath) => resolveLinkedMarkdownFile(plugin, linkedPath, sourcePath))
 		.filter((file): file is TFile => file !== null);
 	const fileSystemAdapter = getFileSystemAdapter(plugin);
-	const candidates = await Promise.all(candidateFiles.map(async (file) => ({
-		file,
-		createdTimestamp: await getCreatedTimestamp(fileSystemAdapter, file),
-	})));
-	candidates.sort((a, b) => compareLinkedNoteCandidates(a, b, config.selectionMode));
+	const candidates = await Promise.all(candidateFiles.map(async (file) => {
+		const createdTimestamp = await getCreatedTimestamp(fileSystemAdapter, file);
+		const frontmatter = getNoteFrontmatter(plugin, file);
+		const requiredFrontmatterField = config.filters.requiredFrontmatterField;
+		if (requiredFrontmatterField && !hasRequiredFrontmatterField(frontmatter, requiredFrontmatterField)) {
+			return null;
+		}
+
+		return {
+			file,
+			createdTimestamp,
+			sortTimestamp: resolveLinkedSortTimestamp({
+				file,
+				createdTimestamp,
+				frontmatter,
+				sort: config.sort,
+			}),
+			frontmatter,
+		};
+	}));
+	const filteredCandidates = candidates.filter((candidate): candidate is LinkedNoteCandidate => candidate !== null);
+	filteredCandidates.sort((a, b) => compareLinkedNoteCandidates(a, b, config.sort));
 	const snapshots: LinkedNoteSnapshot[] = [];
 
-	for (const candidate of candidates) {
+	for (const candidate of filteredCandidates) {
 		if (snapshots.length >= config.maxNotes) {
 			break;
 		}
@@ -828,21 +994,117 @@ function resolveLinkedMarkdownFile(plugin: Plugin, linkPath: string, sourcePath:
 function compareLinkedNoteCandidates(
 	a: LinkedNoteCandidate,
 	b: LinkedNoteCandidate,
-	mode: LinkedNoteSelectionMode,
+	sort: LinkedNoteSortConfig,
 ): number {
-	if (mode === 'recently-created') {
-		const byCreatedTimestamp = b.createdTimestamp - a.createdTimestamp;
-		if (byCreatedTimestamp !== 0) {
-			return byCreatedTimestamp;
-		}
+	const directionMultiplier = sort.direction === 'ascending' ? 1 : -1;
+	const bySortTimestamp = compareSortTimestamps(a.sortTimestamp, b.sortTimestamp, directionMultiplier);
+	if (bySortTimestamp !== 0) {
+		return bySortTimestamp;
 	}
 
-	const byMtime = b.file.stat.mtime - a.file.stat.mtime;
+	const byMtime = (a.file.stat.mtime - b.file.stat.mtime) * directionMultiplier;
 	if (byMtime !== 0) {
 		return byMtime;
 	}
 
 	return a.file.path.localeCompare(b.file.path);
+}
+
+function compareSortTimestamps(
+	aTimestamp: number | null,
+	bTimestamp: number | null,
+	directionMultiplier: number,
+): number {
+	const aMissing = aTimestamp === null;
+	const bMissing = bTimestamp === null;
+	if (aMissing && !bMissing) {
+		return 1;
+	}
+	if (!aMissing && bMissing) {
+		return -1;
+	}
+	if (aMissing && bMissing) {
+		return 0;
+	}
+
+	return ((aTimestamp ?? 0) - (bTimestamp ?? 0)) * directionMultiplier;
+}
+
+function resolveLinkedSortTimestamp(input: {
+	file: TFile;
+	createdTimestamp: number;
+	frontmatter: Record<string, unknown> | null;
+	sort: LinkedNoteSortConfig;
+}): number | null {
+	if (input.sort.field === 'created-date') {
+		return Number.isFinite(input.createdTimestamp) && input.createdTimestamp > 0
+			? input.createdTimestamp
+			: null;
+	}
+
+	if (input.sort.field === 'frontmatter-date') {
+		const field = input.sort.frontmatterDateField;
+		if (!field) {
+			return null;
+		}
+		return parseFrontmatterDateValue(input.frontmatter?.[field]);
+	}
+
+	return Number.isFinite(input.file.stat.mtime) && input.file.stat.mtime > 0
+		? input.file.stat.mtime
+		: null;
+}
+
+function getNoteFrontmatter(plugin: Plugin, file: TFile): Record<string, unknown> | null {
+	const cache = plugin.app.metadataCache.getFileCache(file);
+	const frontmatter = cache?.frontmatter;
+	if (!frontmatter || typeof frontmatter !== 'object') {
+		return null;
+	}
+	return frontmatter as Record<string, unknown>;
+}
+
+function hasRequiredFrontmatterField(frontmatter: Record<string, unknown> | null, field: string): boolean {
+	if (!frontmatter) {
+		return false;
+	}
+	const value = frontmatter[field];
+	if (value === null || value === undefined) {
+		return false;
+	}
+	if (typeof value === 'string') {
+		return value.trim().length > 0;
+	}
+	return true;
+}
+
+function parseFrontmatterDateValue(value: unknown): number | null {
+	if (typeof value === 'number' && Number.isFinite(value)) {
+		if (value <= 0) {
+			return null;
+		}
+		return value < 1_000_000_000_000 ? value * 1000 : value;
+	}
+
+	if (typeof value !== 'string') {
+		return null;
+	}
+
+	const trimmed = value.trim();
+	if (!trimmed) {
+		return null;
+	}
+
+	const numeric = Number(trimmed);
+	if (Number.isFinite(numeric) && numeric > 0) {
+		return numeric < 1_000_000_000_000 ? numeric * 1000 : numeric;
+	}
+
+	const parsed = Date.parse(trimmed);
+	if (Number.isNaN(parsed) || parsed <= 0) {
+		return null;
+	}
+	return parsed;
 }
 
 function getOutgoingLinkCandidates(plugin: Plugin, sourcePath: string): string[] {
@@ -933,7 +1195,7 @@ function buildStandardizedPrompt(
 		`  <current_note available="${context.currentNoteAvailable ? 'true' : 'false'}">`,
 		escapeXml(context.currentNoteContent),
 		'  </current_note>',
-		`  <linked_note_content enabled="${context.linkedNoteContentEnabled ? 'true' : 'false'}" selection_mode="${escapeXml(context.linkedNoteSelectionMode)}">`,
+		`  <linked_note_content enabled="${context.linkedNoteContentEnabled ? 'true' : 'false'}" sort_field="${escapeXml(context.linkedNoteSortField)}" sort_direction="${escapeXml(context.linkedNoteSortDirection)}" sort_frontmatter_date_field="${escapeXml(context.linkedNoteSortFrontmatterDateField)}" include_outgoing_links="${context.linkedNoteIncludeOutgoingLinks ? 'true' : 'false'}" include_backlinks="${context.linkedNoteIncludeBacklinks ? 'true' : 'false'}" required_frontmatter_field="${escapeXml(context.linkedNoteRequiredFrontmatterField)}">`,
 		context.linkedNoteSnapshots.length > 0
 			? formatLinkedNoteSnapshots(context.linkedNoteSnapshots)
 			: 'No linked notes were loaded.',
