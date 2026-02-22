@@ -41,6 +41,7 @@ export class CodexCliProvider implements AgentProvider {
 			promptText,
 			this.runningProcesses,
 			request.onOutputChunk,
+			request.abortSignal,
 		);
 		return { response };
 	}
@@ -388,12 +389,18 @@ function runProcess(
 	promptText: string,
 	runningProcesses: Set<ChildProcessWithoutNullStreams>,
 	onOutputChunk?: (chunk: AgentOutputChunk) => void,
+	abortSignal?: AbortSignal,
 ): Promise<string> {
 	const commandCandidates = buildCommandCandidates(invocation.command);
 	let candidateIndex = 0;
 
 	return new Promise((resolve, reject) => {
 		const tryStart = (): void => {
+			if (abortSignal?.aborted) {
+				reject(new Error(buildCancelledMessage()));
+				return;
+			}
+
 			const command = commandCandidates[candidateIndex];
 			if (!command) {
 				reject(new Error('No codex command candidates were available.'));
@@ -408,10 +415,19 @@ function runProcess(
 			runningProcesses.add(childProcess);
 			let timedOut = false;
 			let settled = false;
+			let cancelled = false;
 			const timeoutHandle = globalThis.setTimeout(() => {
 				timedOut = true;
 				childProcess.kill();
 			}, invocation.timeoutMs);
+			const abortHandler = (): void => {
+				if (settled || timedOut) {
+					return;
+				}
+				cancelled = true;
+				childProcess.kill();
+			};
+			abortSignal?.addEventListener('abort', abortHandler);
 
 			let stdout = '';
 			let stderr = '';
@@ -434,7 +450,12 @@ function runProcess(
 				}
 				settled = true;
 				globalThis.clearTimeout(timeoutHandle);
+				abortSignal?.removeEventListener('abort', abortHandler);
 				runningProcesses.delete(childProcess);
+				if (cancelled || abortSignal?.aborted) {
+					reject(new Error(buildCancelledMessage()));
+					return;
+				}
 				if (isCommandNotFoundError(error) && candidateIndex + 1 < commandCandidates.length) {
 					candidateIndex += 1;
 					tryStart();
@@ -450,9 +471,14 @@ function runProcess(
 				}
 				settled = true;
 				globalThis.clearTimeout(timeoutHandle);
+				abortSignal?.removeEventListener('abort', abortHandler);
 				runningProcesses.delete(childProcess);
 				if (timedOut) {
 					reject(new Error(buildTimeoutMessage(invocation.timeoutMs)));
+					return;
+				}
+				if (cancelled || abortSignal?.aborted) {
+					reject(new Error(buildCancelledMessage()));
 					return;
 				}
 				if (code === 0) {
@@ -472,6 +498,10 @@ function runProcess(
 
 		tryStart();
 	});
+}
+
+function buildCancelledMessage(): string {
+	return 'Agent execution canceled by user.';
 }
 
 function buildTimeoutMessage(timeoutMs: number): string {

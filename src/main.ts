@@ -4,6 +4,7 @@ import { registerAgentCodeBlockProcessor } from './agent-block';
 import { CodexCliProvider } from './providers/codex-provider';
 import { OllamaProvider } from './providers/ollama-provider';
 import {
+	type AgentCacheMode,
 	type AgentBlocksSettings,
 	type AgentTemplate,
 	type AgentTemplateContextConfig,
@@ -25,7 +26,6 @@ import {
 } from './settings';
 
 const MAX_EXECUTION_LOG_ENTRIES = 100;
-const MAX_PROMPT_CACHE_ENTRIES = 1000;
 const MAX_PROCESS_OUTPUT_CHARS = 100_000;
 const PROCESS_OUTPUT_SAVE_INTERVAL_MS = 500;
 
@@ -34,12 +34,15 @@ interface ProcessOutputState {
 	lastStream: 'stdout' | 'stderr' | null;
 }
 
+const USER_CANCELLED_MESSAGE = 'Agent execution canceled by user.';
+
 export default class AgentBlocksPlugin extends Plugin {
 	settings!: AgentBlocksSettings;
 	private readonly codexProvider = new CodexCliProvider();
 	private readonly ollamaProvider = new OllamaProvider();
 	private readonly lastProcessOutputSaveAtByLogId = new Map<string, number>();
 	private readonly processOutputStateByLogId = new Map<string, ProcessOutputState>();
+	private readonly cancelExecutionByLogId = new Map<string, () => void>();
 	private settingTab: AgentSettingTab | null = null;
 
 	async onload(): Promise<void> {
@@ -53,8 +56,11 @@ export default class AgentBlocksPlugin extends Plugin {
 			setExecutionLogInvocation: async (id, invocation) => this.setExecutionLogInvocation(id, invocation),
 			appendExecutionLogOutput: async (id, stream, text) => this.appendExecutionLogOutput(id, stream, text),
 			completeExecutionLog: async (id, entry) => this.completeExecutionLog(id, entry),
+			cancelExecutionLogRun: async (id) => this.cancelExecutionLogRun(id),
 			getCachedResponse: (promptHash: string) => this.settings.promptCache[promptHash]?.response ?? null,
 			cacheResponse: async (promptHash: string, response: string) => this.saveCachedResponse(promptHash, response),
+			getBlockPromptCacheKey: (blockCacheId: string) => this.getBlockPromptCacheKey(blockCacheId),
+			setBlockPromptCacheKey: async (blockCacheId: string, promptHash: string) => this.setBlockPromptCacheKey(blockCacheId, promptHash),
 		});
 
 		this.settingTab = new AgentSettingTab(this.app, this);
@@ -64,6 +70,10 @@ export default class AgentBlocksPlugin extends Plugin {
 	onunload(): void {
 		this.codexProvider.dispose();
 		this.ollamaProvider.dispose?.();
+		for (const cancel of this.cancelExecutionByLogId.values()) {
+			cancel();
+		}
+		this.cancelExecutionByLogId.clear();
 		this.settingTab = null;
 	}
 
@@ -74,6 +84,13 @@ export default class AgentBlocksPlugin extends Plugin {
 
 	async saveSettings(): Promise<void> {
 		await this.saveData(this.settings);
+	}
+
+	async applyPromptCacheLimit(): Promise<void> {
+		this.settings.promptCacheMaxEntries = normalizePromptCacheMaxEntries(this.settings.promptCacheMaxEntries);
+		enforcePromptCacheLimit(this.settings.promptCache, this.settings.promptCacheMaxEntries);
+		pruneBlockPromptCacheIndex(this.settings.blockPromptCacheIndex, this.settings.promptCache);
+		await this.saveSettings();
 	}
 
 	private resolveTemplate(templateId: string | null): AgentTemplate | null {
@@ -95,24 +112,104 @@ export default class AgentBlocksPlugin extends Plugin {
 		template: AgentTemplate;
 		prompt: string;
 		overrides: AgentBlockOverrides;
+		executionLogId?: string;
 		onInvocation?: (invocation: AgentInvocation) => void;
 		onOutputChunk?: (chunk: AgentOutputChunk) => void;
 	}): Promise<string> {
-		const runRequest = {
-			template: request.template,
-			prompt: request.prompt,
-			overrides: request.overrides,
-			onInvocation: request.onInvocation,
-			onOutputChunk: request.onOutputChunk,
-		};
+		const abortController = new AbortController();
+		let settled = false;
+		let cancelled = false;
 
-		if (request.template.provider === 'codex') {
-			const result = await this.codexProvider.run(runRequest);
-			return result.response;
+		return await new Promise<string>((resolve, reject) => {
+			const finishResolve = (value: string): void => {
+				if (settled) {
+					return;
+				}
+				settled = true;
+				if (request.executionLogId) {
+					this.cancelExecutionByLogId.delete(request.executionLogId);
+				}
+				resolve(value);
+			};
+
+			const finishReject = (error: Error): void => {
+				if (settled) {
+					return;
+				}
+				settled = true;
+				if (request.executionLogId) {
+					this.cancelExecutionByLogId.delete(request.executionLogId);
+				}
+				reject(error);
+			};
+
+			const cancel = (): void => {
+				if (settled || cancelled) {
+					return;
+				}
+				cancelled = true;
+				abortController.abort();
+				finishReject(new Error(USER_CANCELLED_MESSAGE));
+			};
+
+			if (request.executionLogId) {
+				this.cancelExecutionByLogId.set(request.executionLogId, cancel);
+			}
+
+			const runRequest = {
+				template: request.template,
+				prompt: request.prompt,
+				overrides: request.overrides,
+				abortSignal: abortController.signal,
+				onInvocation: (invocation: AgentInvocation) => {
+					if (settled || cancelled) {
+						return;
+					}
+					request.onInvocation?.(invocation);
+				},
+				onOutputChunk: (chunk: AgentOutputChunk) => {
+					if (settled || cancelled) {
+						return;
+					}
+					request.onOutputChunk?.(chunk);
+				},
+			};
+
+			const runPromise = request.template.provider === 'codex'
+				? this.codexProvider.run(runRequest)
+				: this.ollamaProvider.run(runRequest);
+
+			runPromise
+				.then((result) => {
+					if (cancelled || abortController.signal.aborted) {
+						finishReject(new Error(USER_CANCELLED_MESSAGE));
+						return;
+					}
+					finishResolve(result.response);
+				})
+				.catch((error: unknown) => {
+					if (cancelled || abortController.signal.aborted) {
+						finishReject(new Error(USER_CANCELLED_MESSAGE));
+						return;
+					}
+
+					if (error instanceof Error) {
+						finishReject(error);
+						return;
+					}
+					finishReject(new Error(String(error)));
+				});
+		});
+	}
+
+	async cancelExecutionLogRun(id: string): Promise<boolean> {
+		const cancel = this.cancelExecutionByLogId.get(id);
+		if (!cancel) {
+			return false;
 		}
-
-		const result = await this.ollamaProvider.run(runRequest);
-		return result.response;
+		cancel();
+		this.settingTab?.notifyExecutionLogUpdated();
+		return true;
 	}
 
 	private async startExecutionLog(entry: {
@@ -152,6 +249,11 @@ export default class AgentBlocksPlugin extends Plugin {
 			for (const logId of this.processOutputStateByLogId.keys()) {
 				if (!retainedIds.has(logId)) {
 					this.processOutputStateByLogId.delete(logId);
+				}
+			}
+			for (const logId of this.cancelExecutionByLogId.keys()) {
+				if (!retainedIds.has(logId)) {
+					this.cancelExecutionByLogId.delete(logId);
 				}
 			}
 		}
@@ -205,7 +307,12 @@ export default class AgentBlocksPlugin extends Plugin {
 
 	private async completeExecutionLog(
 		id: string,
-		entry: { response: string; wasError: boolean; durationMs: number },
+		entry: {
+			response: string;
+			wasError: boolean;
+			durationMs: number;
+			status?: 'success' | 'error' | 'stopped';
+		},
 	): Promise<void> {
 		const existing = this.settings.executionLog.find((logEntry) => logEntry.id === id);
 		if (!existing) {
@@ -213,11 +320,12 @@ export default class AgentBlocksPlugin extends Plugin {
 		}
 
 		existing.response = entry.response;
-		existing.wasError = entry.wasError;
 		existing.durationMs = entry.durationMs;
-		existing.status = entry.wasError ? 'error' : 'success';
+		existing.status = entry.status ?? (entry.wasError ? 'error' : 'success');
+		existing.wasError = existing.status === 'error';
 		this.lastProcessOutputSaveAtByLogId.delete(id);
 		this.processOutputStateByLogId.delete(id);
+		this.cancelExecutionByLogId.delete(id);
 		await this.saveSettings();
 		this.settingTab?.notifyExecutionLogUpdated();
 	}
@@ -227,7 +335,33 @@ export default class AgentBlocksPlugin extends Plugin {
 			response,
 			cachedAt: new Date().toISOString(),
 		};
-		enforcePromptCacheLimit(this.settings.promptCache, MAX_PROMPT_CACHE_ENTRIES);
+		enforcePromptCacheLimit(this.settings.promptCache, this.settings.promptCacheMaxEntries);
+		pruneBlockPromptCacheIndex(this.settings.blockPromptCacheIndex, this.settings.promptCache);
+		await this.saveSettings();
+	}
+
+	private getBlockPromptCacheKey(blockCacheId: string): string | null {
+		if (!blockCacheId) {
+			return null;
+		}
+		const hash = this.settings.blockPromptCacheIndex[blockCacheId];
+		return typeof hash === 'string' && hash.trim() ? hash : null;
+	}
+
+	private async setBlockPromptCacheKey(blockCacheId: string, promptHash: string): Promise<void> {
+		const normalizedBlockId = blockCacheId.trim();
+		if (!normalizedBlockId) {
+			return;
+		}
+
+		const normalizedPromptHash = promptHash.trim();
+		if (!normalizedPromptHash) {
+			delete this.settings.blockPromptCacheIndex[normalizedBlockId];
+			await this.saveSettings();
+			return;
+		}
+
+		this.settings.blockPromptCacheIndex[normalizedBlockId] = normalizedPromptHash;
 		await this.saveSettings();
 	}
 }
@@ -242,13 +376,21 @@ function migrateAndNormalizeSettings(loadedData: Record<string, unknown> | null)
 
 	const normalizedLog = normalizeExecutionLog(loaded.executionLog);
 	const normalizedCache = normalizePromptCache(loaded.promptCache);
+	const promptCacheMaxEntries = normalizePromptCacheMaxEntries(loaded.promptCacheMaxEntries);
+	enforcePromptCacheLimit(normalizedCache, promptCacheMaxEntries);
+	const normalizedBlockPromptCacheIndex = normalizeBlockPromptCacheIndex(
+		loaded.blockPromptCacheIndex,
+		normalizedCache,
+	);
 
 	return {
 		globalInstructions: typeof loaded.globalInstructions === 'string' ? loaded.globalInstructions : '',
 		agentTemplates: migratedTemplates,
 		defaultAgentTemplateId: defaultTemplateId,
+		promptCacheMaxEntries,
 		executionLog: normalizedLog,
 		promptCache: normalizedCache,
+		blockPromptCacheIndex: normalizedBlockPromptCacheIndex,
 	};
 }
 
@@ -269,6 +411,7 @@ function migrateAgentTemplates(loaded: Record<string, unknown>): AgentTemplate[]
 		id: legacyTemplate.id,
 		name: legacyTemplate.name,
 		instructions: legacyTemplate.prompt,
+		cacheMode: 'auto-refresh' as const,
 		context: createDefaultTemplateContextConfig(),
 		provider: 'codex' as const,
 		providerConfig: { ...legacyCodexConfig },
@@ -302,6 +445,7 @@ function normalizeAgentTemplate(value: unknown): AgentTemplate | null {
 			id,
 			name,
 			instructions,
+			cacheMode: normalizeAgentCacheMode(raw.cacheMode),
 			context: normalizeTemplateContext(raw.context),
 			provider,
 			providerConfig: normalizeCodexConfig(raw.providerConfig),
@@ -312,10 +456,18 @@ function normalizeAgentTemplate(value: unknown): AgentTemplate | null {
 		id,
 		name,
 		instructions,
+		cacheMode: normalizeAgentCacheMode(raw.cacheMode),
 		context: normalizeTemplateContext(raw.context),
 		provider,
 		providerConfig: normalizeOllamaConfig(raw.providerConfig),
 	};
+}
+
+function normalizeAgentCacheMode(value: unknown): AgentCacheMode {
+	if (value === 'prefer-cache') {
+		return 'prefer-cache';
+	}
+	return 'auto-refresh';
 }
 
 function normalizeTemplateContext(value: unknown): AgentTemplateContextConfig {
@@ -491,6 +643,20 @@ function normalizeNumPredict(value: unknown): number {
 	return Math.round(value);
 }
 
+function normalizePromptCacheMaxEntries(value: unknown): number {
+	if (typeof value !== 'number' || !Number.isFinite(value)) {
+		return DEFAULT_SETTINGS.promptCacheMaxEntries;
+	}
+	const rounded = Math.round(value);
+	if (rounded < 1) {
+		return 1;
+	}
+	if (rounded > 50_000) {
+		return 50_000;
+	}
+	return rounded;
+}
+
 function normalizeLinkedMaxNotes(value: unknown): number {
 	if (typeof value !== 'number' || !Number.isFinite(value)) {
 		return DEFAULT_TEMPLATE_CONTEXT_CONFIG.linkedNoteContent.maxNotes;
@@ -539,7 +705,7 @@ function normalizeExecutionLogEntry(value: unknown): ExecutionLogEntry | null {
 		return null;
 	}
 	const raw = value as Record<string, unknown>;
-	const status = raw.status === 'running' || raw.status === 'success' || raw.status === 'error'
+	const status = raw.status === 'running' || raw.status === 'success' || raw.status === 'error' || raw.status === 'stopped'
 		? raw.status
 		: (raw.wasError ? 'error' : 'success');
 
@@ -578,6 +744,31 @@ function normalizePromptCache(value: unknown): Record<string, PromptCacheEntry> 
 				return typeof raw.response === 'string' && typeof raw.cachedAt === 'string';
 			}),
 	) as Record<string, PromptCacheEntry>;
+}
+
+function normalizeBlockPromptCacheIndex(
+	value: unknown,
+	cache: Record<string, PromptCacheEntry>,
+): Record<string, string> {
+	if (!value || typeof value !== 'object') {
+		return {};
+	}
+
+	const normalized = Object.fromEntries(
+		Object.entries(value)
+			.filter(([blockId, hash]) => {
+				if (typeof blockId !== 'string' || !blockId.trim()) {
+					return false;
+				}
+				if (typeof hash !== 'string' || !hash.trim()) {
+					return false;
+				}
+				return typeof cache[hash]?.response === 'string';
+			})
+			.map(([blockId, hash]) => [blockId, (hash as string).trim()]),
+	) as Record<string, string>;
+
+	return normalized;
 }
 
 function parseLegacyPromptTemplates(value: unknown): Array<{ id: string; name: string; prompt: string }> {
@@ -647,6 +838,17 @@ function enforcePromptCacheLimit(cache: Record<string, PromptCacheEntry>, limit:
 		.forEach(([hash]) => {
 			delete cache[hash];
 		});
+}
+
+function pruneBlockPromptCacheIndex(
+	blockPromptCacheIndex: Record<string, string>,
+	cache: Record<string, PromptCacheEntry>,
+): void {
+	for (const [blockId, hash] of Object.entries(blockPromptCacheIndex)) {
+		if (!cache[hash]) {
+			delete blockPromptCacheIndex[blockId];
+		}
+	}
 }
 
 function formatProcessOutputChunk(

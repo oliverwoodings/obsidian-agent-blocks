@@ -7,6 +7,7 @@ export interface AgentRunRequest {
 	overrides: AgentBlockOverrides;
 	onInvocation?: (invocation: AgentInvocation) => void;
 	onOutputChunk?: (chunk: AgentOutputChunk) => void;
+	abortSignal?: AbortSignal;
 }
 
 export interface AgentRunResult {

@@ -1,6 +1,6 @@
 {
 	"id": "obsidian-agent-blocks",
-	"name": "Obsidian Agent Blocks",
+	"name": "Agent Blocks",
 	"version": "1.0.0",
 	"minAppVersion": "0.15.0",
 	"description": "Render local agent output in Obsidian markdown blocks using Codex CLI or Ollama.",

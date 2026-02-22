@@ -16,13 +16,15 @@ export interface ExecutionLogEntry {
 	processOutput: string;
 	wasError: boolean;
 	durationMs: number;
-	status: 'running' | 'success' | 'error';
+	status: 'running' | 'success' | 'error' | 'stopped';
 }
 
 export interface PromptCacheEntry {
 	response: string;
 	cachedAt: string;
 }
+
+export type AgentCacheMode = 'auto-refresh' | 'prefer-cache';
 
 export interface CodexAgentProviderConfig {
 	command: string;
@@ -74,6 +76,7 @@ interface AgentTemplateBase {
 	id: string;
 	name: string;
 	instructions: string;
+	cacheMode: AgentCacheMode;
 	context: AgentTemplateContextConfig;
 }
 
@@ -93,8 +96,10 @@ export interface AgentBlocksSettings {
 	globalInstructions: string;
 	agentTemplates: AgentTemplate[];
 	defaultAgentTemplateId: string;
+	promptCacheMaxEntries: number;
 	executionLog: ExecutionLogEntry[];
 	promptCache: Record<string, PromptCacheEntry>;
+	blockPromptCacheIndex: Record<string, string>;
 }
 
 export const DEFAULT_CODEX_PROVIDER_CONFIG: CodexAgentProviderConfig = {
@@ -138,8 +143,10 @@ export const DEFAULT_SETTINGS: AgentBlocksSettings = {
 	globalInstructions: '',
 	agentTemplates: [createDefaultCodexAgentTemplate('default-agent')],
 	defaultAgentTemplateId: 'default-agent',
+	promptCacheMaxEntries: 1000,
 	executionLog: [],
 	promptCache: {},
+	blockPromptCacheIndex: {},
 };
 
 const REASONING_OPTIONS: Array<{ value: string; label: string }> = [
@@ -172,10 +179,6 @@ export class AgentSettingTab extends PluginSettingTab {
 			window.clearTimeout(this.logRefreshTimeoutId);
 			this.logRefreshTimeoutId = null;
 		}
-
-		new Setting(containerEl)
-			.setName('Agent blocks')
-			.setHeading();
 
 		new Setting(containerEl)
 			.setName('Global instructions')
@@ -238,6 +241,33 @@ export class AgentSettingTab extends PluginSettingTab {
 					}));
 
 		new Setting(containerEl)
+			.setName('Prompt cache')
+			.setHeading();
+
+		new Setting(containerEl)
+			.setName('Max cache entries')
+			.setDesc('Maximum number of cached prompt responses to retain.')
+			.addText((text) => text
+				.setPlaceholder('1000')
+				.setValue(String(this.plugin.settings.promptCacheMaxEntries))
+				.onChange(async (value) => {
+					this.plugin.settings.promptCacheMaxEntries = normalizePromptCacheMaxEntries(value);
+					await this.plugin.applyPromptCacheLimit();
+				}));
+
+		new Setting(containerEl)
+			.setName('Cached prompts')
+			.setDesc(`${Object.keys(this.plugin.settings.promptCache).length} saved.`)
+			.addButton((button) => button
+				.setButtonText('Clear cache')
+				.onClick(async () => {
+					this.plugin.settings.promptCache = {};
+					this.plugin.settings.blockPromptCacheIndex = {};
+					await this.plugin.saveSettings();
+					this.display();
+				}));
+
+		new Setting(containerEl)
 			.setName('Execution log')
 			.setHeading();
 
@@ -259,22 +289,8 @@ export class AgentSettingTab extends PluginSettingTab {
 			this.executionLogContainerEl,
 			this.plugin.settings.executionLog,
 			this.expandedExecutionLogIds,
+			(id) => this.stopExecutionLogRun(id),
 		);
-
-		new Setting(containerEl)
-			.setName('Prompt cache')
-			.setHeading();
-
-		new Setting(containerEl)
-			.setName('Cached prompts')
-			.setDesc(`${Object.keys(this.plugin.settings.promptCache).length} saved.`)
-			.addButton((button) => button
-				.setButtonText('Clear cache')
-				.onClick(async () => {
-					this.plugin.settings.promptCache = {};
-					await this.plugin.saveSettings();
-					this.display();
-				}));
 	}
 
 	notifyExecutionLogUpdated(): void {
@@ -309,8 +325,14 @@ export class AgentSettingTab extends PluginSettingTab {
 			this.executionLogContainerEl,
 			this.plugin.settings.executionLog,
 			this.expandedExecutionLogIds,
+			(id) => this.stopExecutionLogRun(id),
 		);
 		restoreExecutionLogScrollState(this.executionLogContainerEl, scrollStates);
+	}
+
+	private async stopExecutionLogRun(id: string): Promise<void> {
+		await this.plugin.cancelExecutionLogRun(id);
+		this.refreshExecutionLogSection();
 	}
 
 	private pruneExpandedExecutionLogIds(): void {
@@ -418,18 +440,32 @@ export class AgentSettingTab extends PluginSettingTab {
 					this.display();
 				}));
 
-		new Setting(templateContainer)
+		const templateInstructionsSetting = new Setting(templateContainer)
 			.setName('Template instructions')
 			.setDesc('Prepended to the block instruction when this template is used.')
 			.addTextArea((text) => {
 				text.setPlaceholder('Summarize in bullet points and preserve note links.');
 				text.setValue(template.instructions);
-				text.inputEl.rows = 4;
+				text.inputEl.rows = 8;
+				text.inputEl.addClass('agent-template-instructions-input');
 				text.onChange(async (value) => {
 					template.instructions = value;
 					await this.plugin.saveSettings();
 				});
 			});
+		templateInstructionsSetting.settingEl.addClass('agent-template-instructions-setting');
+
+		new Setting(templateContainer)
+			.setName('Cache mode')
+			.setDesc('Controls whether prompt changes auto-refresh or keep using cached output until manual refresh.')
+			.addDropdown((dropdown) => dropdown
+				.addOption('auto-refresh', 'Auto refresh on prompt changes')
+				.addOption('prefer-cache', 'Prefer cached result (manual refresh)')
+				.setValue(template.cacheMode)
+				.onChange(async (value: AgentCacheMode) => {
+					template.cacheMode = normalizeAgentCacheMode(value);
+					await this.plugin.saveSettings();
+				}));
 
 		this.renderContextSettings(templateContainer, template);
 
@@ -717,6 +753,7 @@ export function createDefaultCodexAgentTemplate(id: string): CodexAgentTemplate 
 		name: 'Default codex agent',
 		provider: 'codex',
 		instructions: '',
+		cacheMode: 'auto-refresh',
 		context: createDefaultTemplateContextConfig(),
 		providerConfig: { ...DEFAULT_CODEX_PROVIDER_CONFIG },
 	};
@@ -728,6 +765,7 @@ export function createDefaultOllamaAgentTemplate(id: string): OllamaAgentTemplat
 		name: 'Default ollama agent',
 		provider: 'ollama',
 		instructions: '',
+		cacheMode: 'auto-refresh',
 		context: createDefaultTemplateContextConfig(),
 		providerConfig: { ...DEFAULT_OLLAMA_PROVIDER_CONFIG },
 	};
@@ -754,6 +792,7 @@ export function convertTemplateProvider(template: AgentTemplate, provider: Agent
 			id: template.id,
 			name: template.name,
 			instructions: template.instructions,
+			cacheMode: template.cacheMode,
 			context: cloneTemplateContext(template.context),
 			provider: 'codex',
 			providerConfig: { ...DEFAULT_CODEX_PROVIDER_CONFIG },
@@ -764,6 +803,7 @@ export function convertTemplateProvider(template: AgentTemplate, provider: Agent
 		id: template.id,
 		name: template.name,
 		instructions: template.instructions,
+		cacheMode: template.cacheMode,
 		context: cloneTemplateContext(template.context),
 		provider: 'ollama',
 		providerConfig: { ...DEFAULT_OLLAMA_PROVIDER_CONFIG },
@@ -780,6 +820,7 @@ function duplicateTemplate(template: AgentTemplate, templates: AgentTemplate[]):
 			id,
 			name,
 			instructions: template.instructions,
+			cacheMode: template.cacheMode,
 			context: cloneTemplateContext(template.context),
 			provider: 'codex',
 			providerConfig: { ...template.providerConfig },
@@ -790,6 +831,7 @@ function duplicateTemplate(template: AgentTemplate, templates: AgentTemplate[]):
 		id,
 		name,
 		instructions: template.instructions,
+		cacheMode: template.cacheMode,
 		context: cloneTemplateContext(template.context),
 		provider: 'ollama',
 		providerConfig: { ...template.providerConfig },
@@ -846,6 +888,7 @@ function renderExecutionLog(
 	containerEl: HTMLElement,
 	entries: ExecutionLogEntry[],
 	expandedEntryIds: Set<string>,
+	onStopRun: (id: string) => Promise<void>,
 ): void {
 	if (entries.length === 0) {
 		containerEl.createEl('p', {
@@ -876,6 +919,22 @@ function renderExecutionLog(
 				text: ' (running)',
 				cls: 'agent-execution-log-running-label',
 			});
+			const stopButtonEl = summaryEl.createEl('button', {
+				text: 'Stop',
+				cls: 'agent-execution-log-stop-button',
+			});
+			stopButtonEl.type = 'button';
+			stopButtonEl.addEventListener('click', (event) => {
+				event.preventDefault();
+				event.stopPropagation();
+				stopButtonEl.disabled = true;
+				void onStopRun(entry.id);
+			});
+		} else if (entry.status === 'stopped') {
+			summaryEl.createSpan({
+				text: ' (stopped)',
+				cls: 'agent-execution-log-stopped-label',
+			});
 		} else if (entry.wasError) {
 			summaryEl.createSpan({
 				text: ' (error)',
@@ -905,7 +964,11 @@ function renderExecutionLog(
 			bodyEl,
 			entry.id,
 			'response',
-			entry.status === 'running' ? 'Response (pending)' : (entry.wasError ? 'Response / error' : 'Response'),
+			entry.status === 'running'
+				? 'Response (pending)'
+				: (entry.status === 'stopped'
+					? 'Response (stopped)'
+					: (entry.wasError ? 'Response / error' : 'Response')),
 			entry.status === 'running' ? 'In progress...' : entry.response,
 		);
 	}
@@ -1129,6 +1192,27 @@ function normalizeLinkedSortDirection(value: string): LinkedNoteSortDirection {
 		return 'descending';
 	}
 	return DEFAULT_TEMPLATE_CONTEXT_CONFIG.linkedNoteContent.sort.direction;
+}
+
+function normalizeAgentCacheMode(value: string): AgentCacheMode {
+	if (value === 'prefer-cache') {
+		return 'prefer-cache';
+	}
+	return 'auto-refresh';
+}
+
+function normalizePromptCacheMaxEntries(value: string): number {
+	const parsed = Number.parseInt(value.trim(), 10);
+	if (!Number.isFinite(parsed)) {
+		return DEFAULT_SETTINGS.promptCacheMaxEntries;
+	}
+	if (parsed < 1) {
+		return 1;
+	}
+	if (parsed > 50_000) {
+		return 50_000;
+	}
+	return parsed;
 }
 
 function normalizeLinkedMaxChars(value: string): number {

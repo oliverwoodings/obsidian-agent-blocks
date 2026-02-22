@@ -42,6 +42,7 @@ export class OllamaProvider implements AgentProvider {
 			effectiveConfig.host,
 			baseRequest,
 			request.onOutputChunk,
+			request.abortSignal,
 		);
 		return { response: streamedResponse.trim() };
 	}
@@ -111,7 +112,10 @@ async function runOllamaChat(
 	host: string,
 	baseRequest: Record<string, unknown>,
 	onOutputChunk?: (chunk: AgentOutputChunk) => void,
+	abortSignal?: AbortSignal,
 ): Promise<string> {
+	ensureNotCancelled(abortSignal);
+
 	const streamRequest: Record<string, unknown> = {
 		...baseRequest,
 		stream: true,
@@ -128,10 +132,12 @@ async function runOllamaChat(
 	if (streamResponse.status >= 400) {
 		throw new Error(`Ollama request failed (${streamResponse.status}): ${streamResponse.text || 'Unknown error'}`);
 	}
+	ensureNotCancelled(abortSignal);
 
 	let finalResponse = '';
 	const streamLines = (streamResponse.text || '').split('\n');
 	for (const line of streamLines) {
+		ensureNotCancelled(abortSignal);
 		const trimmed = line.trim();
 		if (!trimmed) {
 			continue;
@@ -152,6 +158,7 @@ async function runOllamaChat(
 		return finalResponse;
 	}
 
+	ensureNotCancelled(abortSignal);
 	const nonStreamResponse = await requestUrl({
 		url: `${host}/api/chat`,
 		method: 'POST',
@@ -166,6 +173,7 @@ async function runOllamaChat(
 	if (nonStreamResponse.status >= 400) {
 		throw new Error(`Ollama request failed (${nonStreamResponse.status}): ${nonStreamResponse.text || 'Unknown error'}`);
 	}
+	ensureNotCancelled(abortSignal);
 	const nonStreamResult = parseJsonLine(nonStreamResponse.text || '');
 	const nonStreamText = extractOllamaChunkText(nonStreamResult);
 	if (nonStreamText) {
@@ -173,6 +181,12 @@ async function runOllamaChat(
 		return nonStreamText;
 	}
 	return '';
+}
+
+function ensureNotCancelled(abortSignal?: AbortSignal): void {
+	if (abortSignal?.aborted) {
+		throw new Error('Agent execution canceled by user.');
+	}
 }
 
 function extractOllamaChunkText(part: unknown): string {

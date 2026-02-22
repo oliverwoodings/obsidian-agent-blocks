@@ -10,6 +10,7 @@ Render local LLM output directly inside notes using an `agent` Markdown code blo
   - Codex CLI
   - Ollama (local)
 - Loading state and one-click refresh per block.
+- Stop button on running blocks and running execution log entries.
 - Execution log in settings with:
   - timestamp
   - origin note
@@ -20,7 +21,7 @@ Render local LLM output directly inside notes using an `agent` Markdown code blo
   - command line args
   - streamed stdout/stderr output
   - in-flight status
-- Prompt cache (default max size: 1000 entries).
+- Prompt cache with configurable max size (default: 1000 entries).
 - Standardized prompt wrapper with Obsidian context:
   - vault root path
   - current file path
@@ -30,6 +31,9 @@ Render local LLM output directly inside notes using an `agent` Markdown code blo
 - Per-block context source overrides (enable/disable, sizing, filtering, and sorting).
 - Global instructions applied to every run.
 - Per-block provider overrides (for example model, reasoning, temperature, timeout, mcp, local provider).
+- Template and per-block cache mode:
+  - `auto-refresh` (default)
+  - `prefer-cache` (uses last cached result for that block until manual refresh)
 
 ## Requirements
 
@@ -110,6 +114,18 @@ linked_content_filter_required_frontmatter_field: review_date
 Summarize this note and key linked context.
 ```
 ````
+
+### Cache mode override in a block
+
+````markdown
+```agent
+template: deep-analysis
+cache_mode: prefer-cache
+Run a thorough analysis using linked context.
+```
+````
+
+When `cache_mode: prefer-cache` is active, prompt changes do not auto-run. The block reuses the last cached result for that block and marks it as stale until you click refresh.
 
 ## Codex local model setting
 

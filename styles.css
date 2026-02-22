@@ -14,6 +14,12 @@
 	margin-bottom: 8px;
 }
 
+.agent-block__actions {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+}
+
 .agent-block__status {
 	font-size: var(--font-ui-smaller);
 	color: var(--text-muted);
@@ -29,6 +35,15 @@
 	line-height: 1;
 	padding: 3px 8px;
 	cursor: pointer;
+}
+
+.agent-block__refresh.is-stop {
+	border-color: var(--text-error);
+	color: var(--text-error);
+}
+
+.agent-block__refresh.is-stop:hover:not(:disabled) {
+	filter: brightness(1.05);
 }
 
 .agent-block__refresh:hover:not(:disabled) {
@@ -70,6 +85,14 @@
 	border-color: var(--text-error);
 }
 
+.agent-block.is-stale {
+	border-color: var(--text-warning);
+}
+
+.agent-block.is-stale .agent-block__status {
+	color: var(--text-warning);
+}
+
 .agent-template-setting {
 	border: 1px solid var(--background-modifier-border);
 	border-radius: 8px;
@@ -92,9 +115,33 @@
 	padding: 0 12px 12px;
 }
 
+.agent-template-instructions-setting {
+	display: block;
+}
+
+.agent-template-instructions-setting .setting-item-info {
+	margin-bottom: 8px;
+}
+
+.agent-template-instructions-setting .setting-item-control {
+	max-width: none;
+	width: 100%;
+}
+
+.agent-template-instructions-input {
+	width: min(100%, 900px);
+	min-height: 140px;
+}
+
 .agent-settings-help {
 	margin-top: 0;
 	color: var(--text-muted);
+}
+
+.agent-execution-log-section {
+	max-height: 56vh;
+	overflow: auto;
+	padding-right: 2px;
 }
 
 .agent-execution-log {
@@ -113,6 +160,27 @@
 .agent-execution-log-summary {
 	cursor: pointer;
 	font-size: var(--font-ui-small);
+}
+
+.agent-execution-log-stop-button {
+	margin-left: 8px;
+	border: 1px solid var(--text-error);
+	border-radius: 6px;
+	background: var(--background-primary);
+	color: var(--text-error);
+	font-size: var(--font-ui-smaller);
+	line-height: 1;
+	padding: 2px 7px;
+	cursor: pointer;
+}
+
+.agent-execution-log-stop-button:hover:not(:disabled) {
+	filter: brightness(1.05);
+}
+
+.agent-execution-log-stop-button:disabled {
+	opacity: 0.55;
+	cursor: default;
 }
 
 .agent-execution-log-body {
@@ -169,6 +237,10 @@
 
 .agent-execution-log-running-label {
 	color: var(--text-accent);
+}
+
+.agent-execution-log-stopped-label {
+	color: var(--text-warning);
 }
 
 @keyframes agent-block-spin {

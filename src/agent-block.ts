@@ -1,9 +1,10 @@
 import path from 'path';
 import { createHash } from 'crypto';
 import { stat } from 'fs/promises';
-import { FileSystemAdapter, MarkdownRenderChild, MarkdownRenderer, Plugin, TFile } from 'obsidian';
+import { FileSystemAdapter, MarkdownRenderChild, MarkdownRenderer, MarkdownView, Plugin, TFile } from 'obsidian';
 import type { AgentBlockOverrides, AgentInvocation, AgentOutputChunk } from './agent-types';
 import type {
+	AgentCacheMode,
 	AgentBlocksSettings,
 	AgentTemplate,
 	AgentTemplateContextConfig,
@@ -21,6 +22,7 @@ interface AgentBlockDependencies {
 		template: AgentTemplate;
 		prompt: string;
 		overrides: AgentBlockOverrides;
+		executionLogId?: string;
 		onInvocation?: (invocation: AgentInvocation) => void;
 		onOutputChunk?: (chunk: AgentOutputChunk) => void;
 	}) => Promise<string>;
@@ -36,10 +38,18 @@ interface AgentBlockDependencies {
 	appendExecutionLogOutput: (id: string, stream: 'stdout' | 'stderr', text: string) => Promise<void>;
 	completeExecutionLog: (
 		id: string,
-		entry: { response: string; wasError: boolean; durationMs: number },
+		entry: {
+			response: string;
+			wasError: boolean;
+			durationMs: number;
+			status?: 'success' | 'error' | 'stopped';
+		},
 	) => Promise<void>;
+	cancelExecutionLogRun: (id: string) => Promise<boolean>;
 	getCachedResponse: (cacheKey: string) => string | null;
 	cacheResponse: (cacheKey: string, response: string) => Promise<void>;
+	getBlockPromptCacheKey: (blockCacheId: string) => string | null;
+	setBlockPromptCacheKey: (blockCacheId: string, promptHash: string) => Promise<void>;
 }
 
 interface ResolvedBlockRequest {
@@ -47,6 +57,7 @@ interface ResolvedBlockRequest {
 	prompt: string;
 	overrides: AgentBlockOverrides;
 	contextConfig: AgentTemplateContextConfig;
+	cacheMode: AgentCacheMode;
 }
 
 interface PromptContext {
@@ -89,6 +100,10 @@ interface BlockContextOverrides {
 	};
 }
 
+interface BlockExecutionOverrides {
+	cacheMode?: AgentCacheMode;
+}
+
 const TEMPLATE_REFERENCE_REGEX = /^(template|use)\s*:\s*(.+)$/iu;
 const MODEL_REFERENCE_REGEX = /^model\s*:\s*(.+)$/iu;
 const REASONING_REFERENCE_REGEX = /^(reasoning|reasoning_effort)\s*:\s*(.+)$/iu;
@@ -100,6 +115,7 @@ const KEEP_ALIVE_REFERENCE_REGEX = /^(keep_alive|keepalive)\s*:\s*(.+)$/iu;
 const NUM_PREDICT_REFERENCE_REGEX = /^(num_predict|max_tokens)\s*:\s*(.+)$/iu;
 const OSS_REFERENCE_REGEX = /^(oss|codex_oss)\s*:\s*(.+)$/iu;
 const LOCAL_PROVIDER_REFERENCE_REGEX = /^(local_provider|codex_local_provider)\s*:\s*(.+)$/iu;
+const CACHE_MODE_REFERENCE_REGEX = /^(cache_mode)\s*:\s*(.+)$/iu;
 const CONTEXT_LINKED_ENABLED_REGEX = /^(context\.linked_note_content\.enabled|linked_content)\s*:\s*(.+)$/iu;
 const CONTEXT_LINKED_MAX_NOTES_REGEX = /^(context\.linked_note_content\.max_notes|linked_content_max_notes)\s*:\s*(.+)$/iu;
 const CONTEXT_LINKED_MAX_CHARS_REGEX = /^(context\.linked_note_content\.max_chars_per_note|linked_content_max_chars)\s*:\s*(.+)$/iu;
@@ -110,22 +126,67 @@ const CONTEXT_LINKED_SORT_FIELD_REGEX = /^(context\.linked_note_content\.sort\.f
 const CONTEXT_LINKED_SORT_DIRECTION_REGEX = /^(context\.linked_note_content\.sort\.direction|linked_content_sort_direction)\s*:\s*(.+)$/iu;
 const CONTEXT_LINKED_SORT_FRONTMATTER_FIELD_REGEX = /^(context\.linked_note_content\.sort\.frontmatter_date_field|linked_content_sort_frontmatter_date_field)\s*:\s*(.+)$/iu;
 const CONTEXT_LINKED_SELECTION_REGEX = /^(context\.linked_note_content\.selection|linked_content_selection)\s*:\s*(.+)$/iu;
+const AUTO_RERUN_DEBOUNCE_MS = 350;
 
 export function registerAgentCodeBlockProcessor(plugin: Plugin, dependencies: AgentBlockDependencies): void {
 	plugin.registerMarkdownCodeBlockProcessor('agent', async (source, el, ctx) => {
 		const blockEl = el.createDiv({ cls: 'agent-block' });
 		const headerEl = blockEl.createDiv({ cls: 'agent-block__header' });
 		const statusEl = headerEl.createDiv({ cls: 'agent-block__status' });
-		const refreshButtonEl = headerEl.createEl('button', {
+		const actionsEl = headerEl.createDiv({ cls: 'agent-block__actions' });
+		const refreshButtonEl = actionsEl.createEl('button', {
 			cls: 'agent-block__refresh',
 			text: '↻',
 		});
 		refreshButtonEl.type = 'button';
 		refreshButtonEl.ariaLabel = 'Refresh agent output';
 		const outputEl = blockEl.createDiv({ cls: 'agent-block__output' });
+		const blockCacheId = buildBlockCacheId(source, ctx.sourcePath, ctx.getSectionInfo?.(el) ?? null);
 		let runSequence = 0;
+		let activeExecutionLogId: string | null = null;
+		let isRunning = false;
+		let autoRerunTimeoutId: number | null = null;
+		let queuedAutoRerun = false;
+
+		const setActionButtonMode = (mode: 'refresh' | 'stop'): void => {
+			if (mode === 'stop') {
+				refreshButtonEl.setText('■');
+				refreshButtonEl.ariaLabel = 'Stop agent execution';
+				refreshButtonEl.addClass('is-stop');
+				return;
+			}
+			refreshButtonEl.setText('↻');
+			refreshButtonEl.ariaLabel = 'Refresh agent output';
+			refreshButtonEl.removeClass('is-stop');
+		};
 
 		const isRunActive = (runId: number): boolean => blockEl.isConnected && runId === runSequence;
+		const scheduleAutoRerun = (): void => {
+			if (!blockEl.isConnected) {
+				return;
+			}
+
+			if (isRunning) {
+				queuedAutoRerun = true;
+				return;
+			}
+
+			if (autoRerunTimeoutId !== null) {
+				window.clearTimeout(autoRerunTimeoutId);
+			}
+
+			autoRerunTimeoutId = window.setTimeout(() => {
+				autoRerunTimeoutId = null;
+				if (!blockEl.isConnected) {
+					return;
+				}
+				if (isRunning) {
+					queuedAutoRerun = true;
+					return;
+				}
+				void runExecution(false);
+			}, AUTO_RERUN_DEBOUNCE_MS);
+		};
 
 		const runExecution = async (forceRefresh: boolean): Promise<void> => {
 			runSequence += 1;
@@ -135,8 +196,12 @@ export function registerAgentCodeBlockProcessor(plugin: Plugin, dependencies: Ag
 			let executionLogId: string | null = null;
 
 			blockEl.removeClass('is-error');
+			blockEl.removeClass('is-stale');
 			blockEl.addClass('is-loading');
-			refreshButtonEl.disabled = true;
+			refreshButtonEl.disabled = false;
+			setActionButtonMode('stop');
+			isRunning = true;
+			activeExecutionLogId = null;
 
 				try {
 					const resolvedBlock = resolveBlockRequest(source, dependencies);
@@ -159,14 +224,46 @@ export function registerAgentCodeBlockProcessor(plugin: Plugin, dependencies: Ag
 				outputEl.setText(forceRefresh ? 'Refreshing response...' : 'Waiting for response...');
 
 				if (!forceRefresh) {
-					const cachedResponse = dependencies.getCachedResponse(cacheKey);
-					if (cachedResponse !== null) {
+					const currentPromptCachedResponse = dependencies.getCachedResponse(cacheKey);
+					const indexedPromptHash = dependencies.getBlockPromptCacheKey(blockCacheId);
+					const indexedCachedResponse = indexedPromptHash
+						? dependencies.getCachedResponse(indexedPromptHash)
+						: null;
+
+					if (resolvedBlock.cacheMode === 'prefer-cache') {
+						if (indexedCachedResponse !== null) {
+							if (!isRunActive(runId)) {
+								return;
+							}
+							const isStalePrompt = indexedPromptHash !== cacheKey;
+							blockEl.removeClass('is-loading');
+							if (isStalePrompt) {
+								blockEl.addClass('is-stale');
+								statusEl.setText('Agent result (cached, stale prompt; refresh to update)');
+							} else {
+								statusEl.setText('Agent result (cached)');
+							}
+							await renderAgentResponse(plugin, ctx.sourcePath, outputEl, indexedCachedResponse, ctx);
+							return;
+						}
+
+						if (currentPromptCachedResponse !== null) {
+							await setBlockPromptCacheKeySafely(dependencies, blockCacheId, cacheKey);
+							if (!isRunActive(runId)) {
+								return;
+							}
+							blockEl.removeClass('is-loading');
+							statusEl.setText('Agent result (cached)');
+							await renderAgentResponse(plugin, ctx.sourcePath, outputEl, currentPromptCachedResponse, ctx);
+							return;
+						}
+					} else if (currentPromptCachedResponse !== null) {
 						if (!isRunActive(runId)) {
 							return;
 						}
 						blockEl.removeClass('is-loading');
 						statusEl.setText('Agent result (cached)');
-						await renderAgentResponse(plugin, ctx.sourcePath, outputEl, cachedResponse, ctx);
+						await renderAgentResponse(plugin, ctx.sourcePath, outputEl, currentPromptCachedResponse, ctx);
 						return;
 					}
 				}
@@ -179,11 +276,13 @@ export function registerAgentCodeBlockProcessor(plugin: Plugin, dependencies: Ag
 					provider: resolvedBlock.template.provider,
 					prompt: standardizedPrompt,
 				});
+				activeExecutionLogId = executionLogId;
 
 				const response = await dependencies.runAgent({
 					template: resolvedBlock.template,
 					prompt: standardizedPrompt,
 					overrides: resolvedBlock.overrides,
+					executionLogId: executionLogId ?? undefined,
 					onInvocation: (invocation) => {
 						if (!executionLogId) {
 							return;
@@ -199,6 +298,7 @@ export function registerAgentCodeBlockProcessor(plugin: Plugin, dependencies: Ag
 				});
 
 				await cacheResponseSafely(dependencies, cacheKey, response);
+				await setBlockPromptCacheKeySafely(dependencies, blockCacheId, cacheKey);
 				if (executionLogId) {
 					await completeExecutionLogSafely(dependencies, executionLogId, {
 						response,
@@ -216,11 +316,14 @@ export function registerAgentCodeBlockProcessor(plugin: Plugin, dependencies: Ag
 				statusEl.setText(`Agent result generated in ${formatBlockDuration(durationMs)}`);
 				await renderAgentResponse(plugin, ctx.sourcePath, outputEl, response, ctx);
 			} catch (error: unknown) {
+				const errorMessage = getErrorMessage(error);
+				const cancelled = isCancelledErrorMessage(errorMessage);
 				if (executionLogId) {
 					await completeExecutionLogSafely(dependencies, executionLogId, {
-						response: getErrorMessage(error),
-						wasError: true,
+						response: errorMessage,
+						wasError: !cancelled,
 						durationMs: Date.now() - startedAt,
+						status: cancelled ? 'stopped' : 'error',
 					});
 				}
 
@@ -229,22 +332,68 @@ export function registerAgentCodeBlockProcessor(plugin: Plugin, dependencies: Ag
 				}
 
 				blockEl.removeClass('is-loading');
+				if (cancelled) {
+					statusEl.setText('Agent execution stopped');
+					outputEl.setText('Execution stopped by user.');
+					return;
+				}
+
 				blockEl.addClass('is-error');
 				statusEl.setText('Agent execution failed');
 				outputEl.empty();
 				outputEl.createEl('pre', {
 					cls: 'agent-block__error',
-					text: getErrorMessage(error),
+					text: errorMessage,
 				});
 			} finally {
 				if (isRunActive(runId)) {
 					refreshButtonEl.disabled = false;
+					setActionButtonMode('refresh');
+					isRunning = false;
+					activeExecutionLogId = null;
+					const shouldAutoRerun = queuedAutoRerun;
+					queuedAutoRerun = false;
+					if (shouldAutoRerun && blockEl.isConnected) {
+						void runExecution(false);
+					}
 				}
 			}
 		};
 
 		refreshButtonEl.addEventListener('click', () => {
-			void runExecution(true);
+			if (!isRunning) {
+				void runExecution(true);
+				return;
+			}
+			const executionId = activeExecutionLogId;
+			if (!executionId) {
+				return;
+			}
+			refreshButtonEl.disabled = true;
+			statusEl.setText('Stopping agent execution...');
+			void cancelExecutionLogRunSafely(dependencies, executionId);
+		});
+
+		const lifecycleChild = new MarkdownRenderChild(blockEl);
+		ctx.addChild(lifecycleChild);
+		lifecycleChild.registerEvent(plugin.app.vault.on('modify', (file) => {
+			if (!(file instanceof TFile) || file.path !== ctx.sourcePath) {
+				return;
+			}
+			scheduleAutoRerun();
+		}));
+		lifecycleChild.registerEvent(plugin.app.workspace.on('editor-change', (_editor, info) => {
+			const file = info.file;
+			if (!(file instanceof TFile) || file.path !== ctx.sourcePath) {
+				return;
+			}
+			scheduleAutoRerun();
+		}));
+		lifecycleChild.register(() => {
+			if (autoRerunTimeoutId !== null) {
+				window.clearTimeout(autoRerunTimeoutId);
+				autoRerunTimeoutId = null;
+			}
 		});
 
 		void runExecution(false);
@@ -278,6 +427,7 @@ function resolveBlockRequest(source: string, dependencies: AgentBlockDependencie
 		prompt: instructionParts.join('\n\n'),
 		overrides: directives.overrides,
 		contextConfig: applyContextOverrides(template.context, directives.contextOverrides),
+		cacheMode: directives.executionOverrides.cacheMode ?? template.cacheMode,
 	};
 }
 
@@ -285,6 +435,7 @@ function extractBlockDirectives(lines: string[]): {
 	templateId: string | null;
 	overrides: AgentBlockOverrides;
 	contextOverrides: BlockContextOverrides;
+	executionOverrides: BlockExecutionOverrides;
 	instructionsStartIndex: number;
 } {
 	let index = 0;
@@ -295,6 +446,7 @@ function extractBlockDirectives(lines: string[]): {
 	let templateId: string | null = null;
 	const overrides: AgentBlockOverrides = {};
 	const contextOverrides: BlockContextOverrides = {};
+	const executionOverrides: BlockExecutionOverrides = {};
 
 	while (index < lines.length) {
 		const line = lines[index] ?? '';
@@ -401,6 +553,16 @@ function extractBlockDirectives(lines: string[]): {
 			overrides.localProvider = requireNonEmptyValue(
 				localProviderMatch[2],
 				'Local provider override is missing a value. Use: local_provider: ollama',
+			);
+			index += 1;
+			continue;
+		}
+
+		const cacheModeMatch = CACHE_MODE_REFERENCE_REGEX.exec(trimmed);
+		if (cacheModeMatch) {
+			executionOverrides.cacheMode = parseCacheModeDirective(
+				cacheModeMatch[2],
+				'Cache mode override must be "auto-refresh" or "prefer-cache". Use: cache_mode: prefer-cache',
 			);
 			index += 1;
 			continue;
@@ -558,6 +720,7 @@ function extractBlockDirectives(lines: string[]): {
 		templateId,
 		overrides,
 		contextOverrides,
+		executionOverrides,
 		instructionsStartIndex: index,
 	};
 }
@@ -629,6 +792,17 @@ function parseLinkedSortDirectionDirective(value: string | undefined, message: s
 	}
 	if (normalized === 'ascending') {
 		return 'ascending';
+	}
+	throw new Error(message);
+}
+
+function parseCacheModeDirective(value: string | undefined, message: string): AgentCacheMode {
+	const normalized = (value ?? '').trim().toLowerCase();
+	if (normalized === 'prefer-cache' || normalized === 'manual-refresh') {
+		return 'prefer-cache';
+	}
+	if (normalized === 'auto-refresh') {
+		return 'auto-refresh';
 	}
 	throw new Error(message);
 }
@@ -756,6 +930,22 @@ function buildCacheKey(
 	return createHash('sha256').update(payload).digest('hex');
 }
 
+function buildBlockCacheId(
+	blockSource: string,
+	sourcePath: string,
+	sectionInfo: { lineStart: number } | null,
+): string {
+	const lineStart = typeof sectionInfo?.lineStart === 'number' ? sectionInfo.lineStart : null;
+	const payload = JSON.stringify({
+		sourcePath,
+		lineStart,
+		fallbackSourceHash: lineStart === null
+			? createHash('sha256').update(blockSource).digest('hex')
+			: null,
+	});
+	return createHash('sha256').update(payload).digest('hex');
+}
+
 async function renderAgentResponse(
 	plugin: Plugin,
 	sourcePath: string,
@@ -851,6 +1041,14 @@ async function getCurrentNoteContent(
 		};
 	}
 
+	const openViewContent = getOpenMarkdownViewContent(plugin, sourcePath);
+	if (openViewContent !== null) {
+		return {
+			content: normalizeLinkedContent(openViewContent),
+			available: true,
+		};
+	}
+
 	try {
 		const content = await plugin.app.vault.cachedRead(abstractFile);
 		return {
@@ -863,6 +1061,24 @@ async function getCurrentNoteContent(
 			available: false,
 		};
 	}
+}
+
+function getOpenMarkdownViewContent(plugin: Plugin, sourcePath: string): string | null {
+	let currentContent: string | null = null;
+	plugin.app.workspace.iterateAllLeaves((leaf) => {
+		if (currentContent !== null) {
+			return;
+		}
+		const view = leaf.view;
+		if (!(view instanceof MarkdownView)) {
+			return;
+		}
+		if (view.file?.path !== sourcePath) {
+			return;
+		}
+		currentContent = view.getViewData();
+	});
+	return currentContent;
 }
 
 async function getLinkedNoteSnapshots(
@@ -1171,11 +1387,11 @@ function buildStandardizedPrompt(
 
 	return [
 		'<response_contract>',
-		'Start the response with a concise Markdown H4 title derived from the instruction.',
 		'Use Obsidian-flavored Markdown where useful (wikilinks, headings, lists, callouts, tables).',
 		'When summarizing, preserve and include relevant Obsidian note links, especially existing [[Note Links]].',
 		'For vault-internal links, use only Obsidian wikilinks like [[Note]], [[Folder/Note]], or [[Note#Heading]].',
 		'Never include a .md extension in Obsidian wikilinks.',
+		'Never wrap Obsidian wikilinks in backticks or inline code spans.',
 		'Use the shortest unambiguous wikilink path.',
 		'Link formatting rule for vault files:',
 		'1) Prefer [[NoteName]] when unambiguous.',
@@ -1290,12 +1506,28 @@ async function appendExecutionLogOutputSafely(
 async function completeExecutionLogSafely(
 	dependencies: AgentBlockDependencies,
 	id: string,
-	entry: { response: string; wasError: boolean; durationMs: number },
+	entry: {
+		response: string;
+		wasError: boolean;
+		durationMs: number;
+		status?: 'success' | 'error' | 'stopped';
+	},
 ): Promise<void> {
 	try {
 		await dependencies.completeExecutionLog(id, entry);
 	} catch {
 		// Logging should not break block rendering.
+	}
+}
+
+async function cancelExecutionLogRunSafely(
+	dependencies: AgentBlockDependencies,
+	id: string,
+): Promise<void> {
+	try {
+		await dependencies.cancelExecutionLogRun(id);
+	} catch {
+		// Cancellation should not break block rendering.
 	}
 }
 
@@ -1311,9 +1543,25 @@ async function cacheResponseSafely(
 	}
 }
 
+async function setBlockPromptCacheKeySafely(
+	dependencies: AgentBlockDependencies,
+	blockCacheId: string,
+	promptHash: string,
+): Promise<void> {
+	try {
+		await dependencies.setBlockPromptCacheKey(blockCacheId, promptHash);
+	} catch {
+		// Cache index writes should not break block rendering.
+	}
+}
+
 function getErrorMessage(error: unknown): string {
 	if (error instanceof Error && error.message) {
 		return error.message;
 	}
 	return 'Unknown error while running agent execution.';
+}
+
+function isCancelledErrorMessage(message: string): boolean {
+	return message.trim().toLowerCase() === 'agent execution canceled by user.';
 }
