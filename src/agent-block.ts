@@ -68,8 +68,6 @@ interface PromptContext {
 interface LinkedNoteSnapshot {
 	path: string;
 	relationship: 'outgoing' | 'backlink' | 'outgoing+backlink';
-	createdDate: string;
-	modifiedDate: string;
 	content: string;
 	wasTruncated: boolean;
 }
@@ -949,8 +947,6 @@ async function getLinkedNoteSnapshots(
 			snapshots.push({
 				path: linkedPath,
 				relationship: getRelationshipLabel(relationship),
-				createdDate: formatXmlDate(candidate.createdTimestamp),
-				modifiedDate: formatXmlDate(candidateFile.stat.mtime),
 				content: trimmedContent,
 				wasTruncated,
 			});
@@ -1224,22 +1220,11 @@ function buildStandardizedPrompt(
 function formatLinkedNoteSnapshots(snapshots: LinkedNoteSnapshot[]): string {
 	return snapshots
 		.map((snapshot) => [
-			`    <linked_note path="${escapeXml(snapshot.path)}" relationship="${escapeXml(snapshot.relationship)}" created_date="${escapeXml(snapshot.createdDate)}" modified_date="${escapeXml(snapshot.modifiedDate)}" truncated="${snapshot.wasTruncated ? 'true' : 'false'}">`,
+			`    <linked_note path="${escapeXml(snapshot.path)}" relationship="${escapeXml(snapshot.relationship)}" truncated="${snapshot.wasTruncated ? 'true' : 'false'}">`,
 			escapeXml(snapshot.content),
 			'    </linked_note>',
 		].join('\n'))
 		.join('\n\n');
-}
-
-function formatXmlDate(value: number): string {
-	if (!Number.isFinite(value) || value <= 0) {
-		return '';
-	}
-	const date = new Date(value);
-	if (Number.isNaN(date.getTime())) {
-		return '';
-	}
-	return date.toISOString().slice(0, 10);
 }
 
 function escapeXml(value: string): string {
