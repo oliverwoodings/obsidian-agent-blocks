@@ -153,6 +153,7 @@ const REASONING_OPTIONS: Array<{ value: string; label: string }> = [
 export class AgentSettingTab extends PluginSettingTab {
 	plugin: AgentBlocksPlugin;
 	private readonly expandedTemplateIds = new Set<string>();
+	private readonly expandedExecutionLogIds = new Set<string>();
 	private executionLogCountSetting: Setting | null = null;
 	private executionLogContainerEl: HTMLElement | null = null;
 	private logRefreshTimeoutId: number | null = null;
@@ -247,12 +248,18 @@ export class AgentSettingTab extends PluginSettingTab {
 				.setButtonText('Clear log')
 				.onClick(async () => {
 					this.plugin.settings.executionLog = [];
+					this.expandedExecutionLogIds.clear();
 					await this.plugin.saveSettings();
 					this.refreshExecutionLogSection();
 				}));
 
 		this.executionLogContainerEl = containerEl.createDiv({ cls: 'agent-execution-log-section' });
-		renderExecutionLog(this.executionLogContainerEl, this.plugin.settings.executionLog);
+		this.pruneExpandedExecutionLogIds();
+		renderExecutionLog(
+			this.executionLogContainerEl,
+			this.plugin.settings.executionLog,
+			this.expandedExecutionLogIds,
+		);
 
 		new Setting(containerEl)
 			.setName('Prompt cache')
@@ -295,8 +302,24 @@ export class AgentSettingTab extends PluginSettingTab {
 			return;
 		}
 
+		const scrollStates = captureExecutionLogScrollState(this.executionLogContainerEl);
 		this.executionLogContainerEl.empty();
-		renderExecutionLog(this.executionLogContainerEl, this.plugin.settings.executionLog);
+		this.pruneExpandedExecutionLogIds();
+		renderExecutionLog(
+			this.executionLogContainerEl,
+			this.plugin.settings.executionLog,
+			this.expandedExecutionLogIds,
+		);
+		restoreExecutionLogScrollState(this.executionLogContainerEl, scrollStates);
+	}
+
+	private pruneExpandedExecutionLogIds(): void {
+		const currentIds = new Set(this.plugin.settings.executionLog.map((entry) => entry.id));
+		for (const id of this.expandedExecutionLogIds) {
+			if (!currentIds.has(id)) {
+				this.expandedExecutionLogIds.delete(id);
+			}
+		}
 	}
 
 	private renderTemplateEditor(containerEl: HTMLElement, template: AgentTemplate, index: number): void {
@@ -819,7 +842,11 @@ function createDuplicatedTemplateId(templates: AgentTemplate[], sourceId: string
 	return candidate;
 }
 
-function renderExecutionLog(containerEl: HTMLElement, entries: ExecutionLogEntry[]): void {
+function renderExecutionLog(
+	containerEl: HTMLElement,
+	entries: ExecutionLogEntry[],
+	expandedEntryIds: Set<string>,
+): void {
 	if (entries.length === 0) {
 		containerEl.createEl('p', {
 			text: 'No executions recorded yet.',
@@ -831,6 +858,14 @@ function renderExecutionLog(containerEl: HTMLElement, entries: ExecutionLogEntry
 	const logContainer = containerEl.createDiv({ cls: 'agent-execution-log' });
 	for (const entry of entries) {
 		const detailsEl = logContainer.createEl('details', { cls: 'agent-execution-log-item' });
+		detailsEl.open = expandedEntryIds.has(entry.id);
+		detailsEl.addEventListener('toggle', () => {
+			if (detailsEl.open) {
+				expandedEntryIds.add(entry.id);
+			} else {
+				expandedEntryIds.delete(entry.id);
+			}
+		});
 		const summaryEl = detailsEl.createEl('summary', { cls: 'agent-execution-log-summary' });
 
 		summaryEl.createSpan({
@@ -851,22 +886,38 @@ function renderExecutionLog(containerEl: HTMLElement, entries: ExecutionLogEntry
 		const bodyEl = detailsEl.createDiv({ cls: 'agent-execution-log-body' });
 		bodyEl.createEl('div', { text: `Provider: ${entry.provider}`, cls: 'agent-execution-log-label' });
 		bodyEl.createEl('div', { text: `Duration: ${formatDuration(entry.durationMs)}`, cls: 'agent-execution-log-label' });
-		createExecutionLogTextSection(bodyEl, 'Prompt', entry.prompt);
-		createExecutionLogTextSection(bodyEl, 'Command line', formatCommandLine(entry.command, entry.commandArgs));
+		createExecutionLogTextSection(bodyEl, entry.id, 'prompt', 'Prompt', entry.prompt);
 		createExecutionLogTextSection(
 			bodyEl,
+			entry.id,
+			'command-line',
+			'Command line',
+			formatCommandLine(entry.command, entry.commandArgs),
+		);
+		createExecutionLogTextSection(
+			bodyEl,
+			entry.id,
+			'process-output',
 			'Process output (stdout/stderr)',
 			entry.processOutput.trim() ? entry.processOutput : 'No process output captured.',
 		);
 		createExecutionLogTextSection(
 			bodyEl,
+			entry.id,
+			'response',
 			entry.status === 'running' ? 'Response (pending)' : (entry.wasError ? 'Response / error' : 'Response'),
 			entry.status === 'running' ? 'In progress...' : entry.response,
 		);
 	}
 }
 
-function createExecutionLogTextSection(containerEl: HTMLElement, label: string, value: string): void {
+function createExecutionLogTextSection(
+	containerEl: HTMLElement,
+	entryId: string,
+	sectionId: string,
+	label: string,
+	value: string,
+): void {
 	const labelRowEl = containerEl.createDiv({ cls: 'agent-execution-log-label-row' });
 	labelRowEl.createEl('div', { text: label, cls: 'agent-execution-log-label' });
 
@@ -885,7 +936,72 @@ function createExecutionLogTextSection(containerEl: HTMLElement, label: string, 
 		text: value,
 		cls: 'agent-execution-log-pre',
 	});
+	preEl.dataset.scrollKey = buildExecutionLogScrollKey(entryId, sectionId);
 	preEl.tabIndex = 0;
+}
+
+interface ExecutionLogPaneScrollState {
+	offsetFromBottom: number;
+	wasAtBottom: boolean;
+}
+
+function captureExecutionLogScrollState(containerEl: HTMLElement): Map<string, ExecutionLogPaneScrollState> {
+	const states = new Map<string, ExecutionLogPaneScrollState>();
+	const panes = containerEl.querySelectorAll<HTMLElement>('.agent-execution-log-pre[data-scroll-key]');
+	for (let index = 0; index < panes.length; index += 1) {
+		const pane = panes[index];
+		if (!pane) {
+			continue;
+		}
+		const key = pane.dataset.scrollKey;
+		if (!key) {
+			continue;
+		}
+		const offsetFromBottom = pane.scrollHeight - (pane.scrollTop + pane.clientHeight);
+		const wasAtBottom = offsetFromBottom <= 2;
+		states.set(key, {
+			offsetFromBottom: Math.max(0, offsetFromBottom),
+			wasAtBottom,
+		});
+	}
+	return states;
+}
+
+function restoreExecutionLogScrollState(
+	containerEl: HTMLElement,
+	scrollStates: Map<string, ExecutionLogPaneScrollState>,
+): void {
+	if (scrollStates.size === 0) {
+		return;
+	}
+
+	const panes = containerEl.querySelectorAll<HTMLElement>('.agent-execution-log-pre[data-scroll-key]');
+	for (let index = 0; index < panes.length; index += 1) {
+		const pane = panes[index];
+		if (!pane) {
+			continue;
+		}
+		const key = pane.dataset.scrollKey;
+		if (!key) {
+			continue;
+		}
+		const previous = scrollStates.get(key);
+		if (!previous) {
+			continue;
+		}
+
+		const maxScrollTop = Math.max(0, pane.scrollHeight - pane.clientHeight);
+		if (previous.wasAtBottom) {
+			pane.scrollTop = maxScrollTop;
+			continue;
+		}
+
+		pane.scrollTop = Math.max(0, maxScrollTop - previous.offsetFromBottom);
+	}
+}
+
+function buildExecutionLogScrollKey(entryId: string, sectionId: string): string {
+	return `${entryId}:${sectionId}`;
 }
 
 async function copyExecutionLogText(buttonEl: HTMLButtonElement, value: string): Promise<void> {
