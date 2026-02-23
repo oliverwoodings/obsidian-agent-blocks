@@ -125,6 +125,23 @@ export function normalizePromptCacheMaxEntries(
 	return Math.round(parsed);
 }
 
+export function normalizePromptCacheMaxEntriesPerBlock(
+	value: unknown,
+	fallback: number = DEFAULT_SETTINGS.promptCacheMaxEntriesPerBlock,
+): number {
+	const parsed = parseInteger(value);
+	if (!Number.isFinite(parsed)) {
+		return fallback;
+	}
+	if (parsed < 1) {
+		return 1;
+	}
+	if (parsed > 100) {
+		return 100;
+	}
+	return Math.round(parsed);
+}
+
 export function normalizeLinkedMaxNotes(
 	value: unknown,
 	fallback: number = DEFAULT_TEMPLATE_CONTEXT_CONFIG.linkedNoteContent.maxNotes,

@@ -16,6 +16,7 @@ import {
 	normalizeNumPredict,
 	normalizeOptionalString,
 	normalizePromptCacheMaxEntries,
+	normalizePromptCacheMaxEntriesPerBlock,
 	normalizeTemperature,
 	normalizeTimeoutSeconds,
 } from '../domain/normalizers';
@@ -29,7 +30,13 @@ import type {
 	OllamaAgentProviderConfig,
 	PromptCacheEntry,
 } from '../domain/types';
-import { enforcePromptCacheLimit } from './prompt-cache';
+import {
+	enforcePerBlockPromptCacheLimit,
+	enforcePromptCacheLimit,
+	pruneBlockPromptCacheHistory,
+	pruneBlockPromptCacheIndex,
+	syncBlockPromptCacheIndexFromHistory,
+} from './prompt-cache';
 
 export function normalizeLoadedSettings(loadedData: Record<string, unknown> | null): AgentBlocksSettings {
 	const loaded = loadedData ?? {};
@@ -42,20 +49,34 @@ export function normalizeLoadedSettings(loadedData: Record<string, unknown> | nu
 	const normalizedLog = normalizeExecutionLog(loaded.executionLog);
 	const normalizedCache = normalizePromptCache(loaded.promptCache);
 	const promptCacheMaxEntries = normalizePromptCacheMaxEntries(loaded.promptCacheMaxEntries);
+	const promptCacheMaxEntriesPerBlock = normalizePromptCacheMaxEntriesPerBlock(loaded.promptCacheMaxEntriesPerBlock);
 	enforcePromptCacheLimit(normalizedCache, promptCacheMaxEntries);
-	const normalizedBlockPromptCacheIndex = normalizeBlockPromptCacheIndex(
-		loaded.blockPromptCacheIndex,
+	const normalizedBlockPromptCacheHistory = normalizeBlockPromptCacheHistory(
+		loaded.blockPromptCacheHistory,
 		normalizedCache,
 	);
+	const normalizedBlockPromptCacheIndex: Record<string, string> = {};
+	syncBlockPromptCacheIndexFromHistory(normalizedBlockPromptCacheIndex, normalizedBlockPromptCacheHistory);
+	const normalizedBlockPromptCacheSourceFingerprintIndex = normalizeBlockPromptCacheSourceFingerprintIndex(
+		loaded.blockPromptCacheSourceFingerprintIndex,
+		normalizedBlockPromptCacheHistory,
+	);
+	enforcePerBlockPromptCacheLimit(normalizedBlockPromptCacheHistory, promptCacheMaxEntriesPerBlock);
+	syncBlockPromptCacheIndexFromHistory(normalizedBlockPromptCacheIndex, normalizedBlockPromptCacheHistory);
+	pruneBlockPromptCacheIndex(normalizedBlockPromptCacheIndex, normalizedCache);
+	pruneBlockPromptCacheHistory(normalizedBlockPromptCacheHistory, normalizedCache);
 
 	return {
 		globalInstructions: typeof loaded.globalInstructions === 'string' ? loaded.globalInstructions : '',
 		agentTemplates: normalizedTemplates,
 		defaultAgentTemplateId: defaultTemplateId,
 		promptCacheMaxEntries,
+		promptCacheMaxEntriesPerBlock,
 		executionLog: normalizedLog,
 		promptCache: normalizedCache,
 		blockPromptCacheIndex: normalizedBlockPromptCacheIndex,
+		blockPromptCacheHistory: normalizedBlockPromptCacheHistory,
+		blockPromptCacheSourceFingerprintIndex: normalizedBlockPromptCacheSourceFingerprintIndex,
 	};
 }
 
@@ -272,9 +293,41 @@ function normalizePromptCache(value: unknown): Record<string, PromptCacheEntry> 
 	) as Record<string, PromptCacheEntry>;
 }
 
-function normalizeBlockPromptCacheIndex(
+function normalizeBlockPromptCacheHistory(
 	value: unknown,
 	cache: Record<string, PromptCacheEntry>,
+): Record<string, string[]> {
+	const normalized: Record<string, string[]> = {};
+	if (value && typeof value === 'object') {
+		for (const [blockId, hashes] of Object.entries(value)) {
+			if (typeof blockId !== 'string' || !blockId.trim() || !Array.isArray(hashes)) {
+				continue;
+			}
+			const seen = new Set<string>();
+			const retained: string[] = [];
+			for (const hash of hashes) {
+				if (typeof hash !== 'string') {
+					continue;
+				}
+				const normalizedHash = hash.trim();
+				if (!normalizedHash || seen.has(normalizedHash) || !cache[normalizedHash]) {
+					continue;
+				}
+				seen.add(normalizedHash);
+				retained.push(normalizedHash);
+			}
+			if (retained.length > 0) {
+				normalized[blockId.trim()] = retained;
+			}
+		}
+	}
+
+	return normalized;
+}
+
+function normalizeBlockPromptCacheSourceFingerprintIndex(
+	value: unknown,
+	blockPromptCacheHistory: Record<string, string[]>,
 ): Record<string, string> {
 	if (!value || typeof value !== 'object') {
 		return {};
@@ -282,15 +335,18 @@ function normalizeBlockPromptCacheIndex(
 
 	return Object.fromEntries(
 		Object.entries(value)
-			.filter(([blockId, hash]) => {
+			.filter(([blockId, fingerprint]) => {
 				if (typeof blockId !== 'string' || !blockId.trim()) {
 					return false;
 				}
-				if (typeof hash !== 'string' || !hash.trim()) {
+				if (!blockPromptCacheHistory[blockId]) {
 					return false;
 				}
-				return typeof cache[hash]?.response === 'string';
+				if (typeof fingerprint !== 'string' || !fingerprint.trim()) {
+					return false;
+				}
+				return true;
 			})
-			.map(([blockId, hash]) => [blockId, (hash as string).trim()]),
+			.map(([blockId, fingerprint]) => [blockId.trim(), (fingerprint as string).trim()]),
 	) as Record<string, string>;
 }

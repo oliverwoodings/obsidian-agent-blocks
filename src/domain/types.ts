@@ -95,7 +95,10 @@ export interface AgentBlocksSettings {
 	agentTemplates: AgentTemplate[];
 	defaultAgentTemplateId: string;
 	promptCacheMaxEntries: number;
+	promptCacheMaxEntriesPerBlock: number;
 	executionLog: ExecutionLogEntry[];
 	promptCache: Record<string, PromptCacheEntry>;
 	blockPromptCacheIndex: Record<string, string>;
+	blockPromptCacheHistory: Record<string, string[]>;
+	blockPromptCacheSourceFingerprintIndex: Record<string, string>;
 }

@@ -42,9 +42,12 @@ export function createSettings(overrides = {}) {
 		agentTemplates: [createBaseTemplate()],
 		defaultAgentTemplateId: 'template-1',
 		promptCacheMaxEntries: 1000,
+		promptCacheMaxEntriesPerBlock: 5,
 		executionLog: [],
 		promptCache: {},
 		blockPromptCacheIndex: {},
+		blockPromptCacheHistory: {},
+		blockPromptCacheSourceFingerprintIndex: {},
 		...overrides,
 	};
 }

@@ -1,5 +1,5 @@
 import { MarkdownRenderChild, Plugin, TFile } from 'obsidian';
-import { buildBlockCacheId, buildCacheKey } from './agent-block/cache';
+import { buildBlockCacheId, buildBlockSourceFingerprint, buildCacheKey } from './agent-block/cache';
 import { buildPromptContext } from './agent-block/context';
 import type { AgentBlockDependencies } from './agent-block/dependencies';
 import { resolveBlockRequest } from './agent-block/directives';
@@ -10,6 +10,7 @@ import {
 	cacheResponseSafely,
 	cancelExecutionLogRunSafely,
 	completeExecutionLogSafely,
+	reconcileBlockCacheForNoteSafely,
 	setBlockPromptCacheKeySafely,
 	setExecutionLogInvocationSafely,
 	startExecutionLogSafely,
@@ -30,7 +31,13 @@ export function registerAgentCodeBlockProcessor(plugin: Plugin, dependencies: Ag
 		refreshButtonEl.type = 'button';
 		refreshButtonEl.ariaLabel = 'Refresh agent output';
 		const outputEl = blockEl.createDiv({ cls: 'agent-block__output' });
-		const blockCacheId = buildBlockCacheId(source, ctx.sourcePath, ctx.getSectionInfo?.(el) ?? null);
+		const blockCacheId = await buildBlockCacheId(
+			plugin.app,
+			source,
+			ctx.sourcePath,
+			ctx.getSectionInfo?.(el) ?? null,
+		);
+		const blockSourceFingerprint = buildBlockSourceFingerprint(source);
 		let runSequence = 0;
 		let activeExecutionLogId: string | null = null;
 		let isRunning = false;
@@ -93,6 +100,7 @@ export function registerAgentCodeBlockProcessor(plugin: Plugin, dependencies: Ag
 			activeExecutionLogId = null;
 
 			try {
+				await reconcileBlockCacheForNoteSafely(dependencies, ctx.sourcePath);
 				const resolvedBlock = resolveBlockRequest(source, dependencies);
 				const promptContext = await buildPromptContext(plugin, ctx.sourcePath, resolvedBlock.contextConfig);
 				const standardizedPrompt = buildStandardizedPrompt(
@@ -121,6 +129,14 @@ export function registerAgentCodeBlockProcessor(plugin: Plugin, dependencies: Ag
 
 					if (resolvedBlock.cacheMode === 'prefer-cache') {
 						if (indexedCachedResponse !== null) {
+							if (indexedPromptHash) {
+								await setBlockPromptCacheKeySafely(
+									dependencies,
+									blockCacheId,
+									indexedPromptHash,
+									blockSourceFingerprint,
+								);
+							}
 							if (!isRunActive(runId)) {
 								return;
 							}
@@ -137,7 +153,12 @@ export function registerAgentCodeBlockProcessor(plugin: Plugin, dependencies: Ag
 						}
 
 						if (currentPromptCachedResponse !== null) {
-							await setBlockPromptCacheKeySafely(dependencies, blockCacheId, cacheKey);
+							await setBlockPromptCacheKeySafely(
+								dependencies,
+								blockCacheId,
+								cacheKey,
+								blockSourceFingerprint,
+							);
 							if (!isRunActive(runId)) {
 								return;
 							}
@@ -147,6 +168,12 @@ export function registerAgentCodeBlockProcessor(plugin: Plugin, dependencies: Ag
 							return;
 						}
 					} else if (currentPromptCachedResponse !== null) {
+						await setBlockPromptCacheKeySafely(
+							dependencies,
+							blockCacheId,
+							cacheKey,
+							blockSourceFingerprint,
+						);
 						if (!isRunActive(runId)) {
 							return;
 						}
@@ -186,8 +213,13 @@ export function registerAgentCodeBlockProcessor(plugin: Plugin, dependencies: Ag
 					},
 				});
 
-				await cacheResponseSafely(dependencies, cacheKey, response);
-				await setBlockPromptCacheKeySafely(dependencies, blockCacheId, cacheKey);
+				await cacheResponseSafely(
+					dependencies,
+					blockCacheId,
+					cacheKey,
+					response,
+					blockSourceFingerprint,
+				);
 				if (executionLogId) {
 					await completeExecutionLogSafely(dependencies, executionLogId, {
 						response,

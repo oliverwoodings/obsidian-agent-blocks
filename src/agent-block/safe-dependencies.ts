@@ -73,13 +73,26 @@ export async function cancelExecutionLogRunSafely(
 	}
 }
 
-export async function cacheResponseSafely(
+export async function reconcileBlockCacheForNoteSafely(
 	dependencies: AgentBlockDependencies,
-	cacheKey: string,
-	response: string,
+	sourcePath: string,
 ): Promise<void> {
 	try {
-		await dependencies.cacheResponse(cacheKey, response);
+		await dependencies.reconcileBlockCacheForNote(sourcePath);
+	} catch {
+		// Reconciliation should not break block rendering.
+	}
+}
+
+export async function cacheResponseSafely(
+	dependencies: AgentBlockDependencies,
+	blockCacheId: string,
+	cacheKey: string,
+	response: string,
+	blockSourceFingerprint: string,
+): Promise<void> {
+	try {
+		await dependencies.cacheBlockResponse(blockCacheId, cacheKey, response, blockSourceFingerprint);
 	} catch {
 		// Cache writes should not break block rendering.
 	}
@@ -89,9 +102,10 @@ export async function setBlockPromptCacheKeySafely(
 	dependencies: AgentBlockDependencies,
 	blockCacheId: string,
 	promptHash: string,
+	blockSourceFingerprint: string,
 ): Promise<void> {
 	try {
-		await dependencies.setBlockPromptCacheKey(blockCacheId, promptHash);
+		await dependencies.setBlockPromptCacheKey(blockCacheId, promptHash, blockSourceFingerprint);
 	} catch {
 		// Cache index writes should not break block rendering.
 	}

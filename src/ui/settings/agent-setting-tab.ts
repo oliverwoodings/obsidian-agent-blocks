@@ -12,6 +12,7 @@ import {
 	normalizeLinkedSortField,
 	normalizeNumPredict,
 	normalizePromptCacheMaxEntries,
+	normalizePromptCacheMaxEntriesPerBlock,
 	normalizeTemperature,
 	normalizeTimeoutSeconds,
 } from '../../domain/normalizers';
@@ -140,16 +141,29 @@ export class AgentSettingTab extends PluginSettingTab {
 				}));
 
 		new Setting(containerEl)
+			.setName('Max entries per block')
+			.setDesc('Maximum cached responses retained per individual agent block.')
+			.addText((text) => text
+				.setPlaceholder('5')
+				.setValue(String(this.plugin.settings.promptCacheMaxEntriesPerBlock))
+				.onChange(async (value) => {
+					this.plugin.settings.promptCacheMaxEntriesPerBlock = normalizePromptCacheMaxEntriesPerBlock(value);
+					await this.plugin.applyPromptCacheLimit();
+				}));
+
+		new Setting(containerEl)
 			.setName('Cached prompts')
 			.setDesc(`${Object.keys(this.plugin.settings.promptCache).length} saved.`)
 			.addButton((button) => button
 				.setButtonText('Clear cache')
-				.onClick(async () => {
-					this.plugin.settings.promptCache = {};
-					this.plugin.settings.blockPromptCacheIndex = {};
-					await this.plugin.saveSettings();
-					this.display();
-				}));
+					.onClick(async () => {
+						this.plugin.settings.promptCache = {};
+						this.plugin.settings.blockPromptCacheIndex = {};
+						this.plugin.settings.blockPromptCacheHistory = {};
+						this.plugin.settings.blockPromptCacheSourceFingerprintIndex = {};
+						await this.plugin.saveSettings();
+						this.display();
+					}));
 
 		new Setting(containerEl)
 			.setName('Execution log')

@@ -4,6 +4,7 @@ import type { AgentCacheMode, AgentBlocksSettings, AgentTemplate, AgentTemplateC
 export interface AgentBlockDependencies {
 	getSettings: () => AgentBlocksSettings;
 	resolveTemplate: (templateId: string | null) => AgentTemplate | null;
+	reconcileBlockCacheForNote: (sourcePath: string) => Promise<void>;
 	runAgent: (request: {
 		template: AgentTemplate;
 		prompt: string;
@@ -33,9 +34,14 @@ export interface AgentBlockDependencies {
 	) => Promise<void>;
 	cancelExecutionLogRun: (id: string) => Promise<boolean>;
 	getCachedResponse: (cacheKey: string) => string | null;
-	cacheResponse: (cacheKey: string, response: string) => Promise<void>;
+	cacheBlockResponse: (
+		blockCacheId: string,
+		cacheKey: string,
+		response: string,
+		blockSourceFingerprint: string,
+	) => Promise<void>;
 	getBlockPromptCacheKey: (blockCacheId: string) => string | null;
-	setBlockPromptCacheKey: (blockCacheId: string, promptHash: string) => Promise<void>;
+	setBlockPromptCacheKey: (blockCacheId: string, promptHash: string, blockSourceFingerprint: string) => Promise<void>;
 }
 
 export interface ResolvedBlockRequest {

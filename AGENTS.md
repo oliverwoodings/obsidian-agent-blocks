@@ -68,6 +68,13 @@ npm run test:integration
 - `tests/integration/`: cross-module behavior and service orchestration.
 - Prefer deterministic assertions over broad snapshot testing.
 - When behavior changes, add/update tests at the smallest layer that gives confidence.
+- Before handoff, run validation commands in this order unless the user explicitly says otherwise:
+  1) `npm run test`
+  2) `npm run lint`
+  3) `npm run build`
+- Do not hand off as complete if any required validation command fails, unless the user explicitly accepts the failure.
+- If any required validation command is skipped, state exactly which command was skipped and why in the final handoff.
+- If behavior changes and no test was added/updated, explicitly justify why in the final handoff.
 
 ## Documentation synchronization
 
@@ -131,7 +138,7 @@ Follow Obsidian Developer Policies and Plugin Guidelines:
 **Do**
 - Follow architecture boundaries defined in `README.md`.
 - Keep `main.ts` as wiring/composition, not feature-heavy logic.
-- Run lint and relevant tests before handoff.
+- Run required validation commands before handoff and report results.
 - Keep README architecture/testing docs in sync with code changes.
 
 **Don't**
@@ -143,11 +150,18 @@ Follow Obsidian Developer Policies and Plugin Guidelines:
 ## Validation checklist (before handoff)
 
 ```bash
+npm run test
 npm run lint
-npm run test:unit
-npm run test:integration
 npm run build
 ```
+
+## Handoff reporting
+
+- Include a short validation summary in every final handoff with pass/fail for:
+  - `npm run test`
+  - `npm run lint`
+  - `npm run build`
+- If any command was skipped or failed, include the reason and current status.
 
 ## Troubleshooting
 

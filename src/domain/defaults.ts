@@ -78,9 +78,12 @@ export const DEFAULT_SETTINGS: AgentBlocksSettings = {
 	agentTemplates: [createDefaultCodexAgentTemplate('default-agent')],
 	defaultAgentTemplateId: 'default-agent',
 	promptCacheMaxEntries: 1000,
+	promptCacheMaxEntriesPerBlock: 5,
 	executionLog: [],
 	promptCache: {},
 	blockPromptCacheIndex: {},
+	blockPromptCacheHistory: {},
+	blockPromptCacheSourceFingerprintIndex: {},
 };
 
 export function createTemplateId(templates: AgentTemplate[]): string {

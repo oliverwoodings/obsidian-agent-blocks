@@ -26,7 +26,7 @@ test('normalizeLoadedSettings ignores legacy-only fields when current schema is 
 	assert.equal(settings.agentTemplates[0].providerConfig.command, 'codex');
 });
 
-test('normalizeLoadedSettings normalizes stale running log entries and prunes cache index', () => {
+test('normalizeLoadedSettings normalizes stale running log entries and derives cache index from history', () => {
 	const template = createBaseTemplate();
 	const settings = normalizeLoadedSettings({
 		agentTemplates: [template],
@@ -50,6 +50,9 @@ test('normalizeLoadedSettings normalizes stale running log entries and prunes ca
 		promptCache: {
 			keep: { response: 'cached', cachedAt: '2024-01-01T00:00:00.000Z' },
 		},
+		blockPromptCacheHistory: {
+			A: ['keep'],
+		},
 		blockPromptCacheIndex: {
 			A: 'keep',
 			B: 'missing',
@@ -59,4 +62,5 @@ test('normalizeLoadedSettings normalizes stale running log entries and prunes ca
 	assert.equal(settings.executionLog[0].status, 'error');
 	assert.equal(settings.executionLog[0].wasError, true);
 	assert.deepEqual(settings.blockPromptCacheIndex, { A: 'keep' });
+	assert.deepEqual(settings.blockPromptCacheHistory, { A: ['keep'] });
 });

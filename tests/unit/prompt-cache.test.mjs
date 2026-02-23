@@ -29,3 +29,83 @@ test('pruneBlockPromptCacheIndex removes missing cache hashes', () => {
 
 	assert.deepEqual(index, { blockA: 'keep' });
 });
+
+test('reconcileBlockCacheEntriesForSourcePath migrates history by fingerprint when ordinals shift', () => {
+	const {
+		reconcileBlockCacheEntriesForSourcePath,
+	} = loadTs('../../src/core/prompt-cache.ts');
+
+	const history = {
+		'agent-block:note.md#0': ['hash-old'],
+	};
+	const index = {
+		'agent-block:note.md#0': 'hash-old',
+	};
+	const fingerprintIndex = {
+		'agent-block:note.md#0': 'fp-original',
+	};
+
+	const changed = reconcileBlockCacheEntriesForSourcePath({
+		sourceBlockIds: ['agent-block:note.md#0'],
+		currentBlocks: [
+			{ blockId: 'agent-block:note.md#0', sourceFingerprint: 'fp-new' },
+			{ blockId: 'agent-block:note.md#1', sourceFingerprint: 'fp-original' },
+		],
+		blockPromptCacheHistory: history,
+		blockPromptCacheIndex: index,
+		blockPromptCacheSourceFingerprintIndex: fingerprintIndex,
+	});
+
+	assert.equal(changed, true);
+	assert.deepEqual(history, {
+		'agent-block:note.md#1': ['hash-old'],
+	});
+	assert.deepEqual(index, {
+		'agent-block:note.md#1': 'hash-old',
+	});
+	assert.deepEqual(fingerprintIndex, {
+		'agent-block:note.md#0': 'fp-new',
+		'agent-block:note.md#1': 'fp-original',
+	});
+});
+
+test('reconcileBlockCacheEntriesForSourcePath falls back to ordinal when fingerprint is unavailable', () => {
+	const {
+		reconcileBlockCacheEntriesForSourcePath,
+	} = loadTs('../../src/core/prompt-cache.ts');
+
+	const history = {
+		'agent-block:note.md#0': ['hash-0'],
+		'agent-block:note.md#1': ['hash-1'],
+	};
+	const index = {
+		'agent-block:note.md#0': 'hash-0',
+		'agent-block:note.md#1': 'hash-1',
+	};
+	const fingerprintIndex = {};
+
+	const changed = reconcileBlockCacheEntriesForSourcePath({
+		sourceBlockIds: ['agent-block:note.md#0', 'agent-block:note.md#1'],
+		currentBlocks: [
+			{ blockId: 'agent-block:note.md#0', sourceFingerprint: 'fp-a' },
+			{ blockId: 'agent-block:note.md#1', sourceFingerprint: 'fp-b' },
+		],
+		blockPromptCacheHistory: history,
+		blockPromptCacheIndex: index,
+		blockPromptCacheSourceFingerprintIndex: fingerprintIndex,
+	});
+
+	assert.equal(changed, true);
+	assert.deepEqual(history, {
+		'agent-block:note.md#0': ['hash-0'],
+		'agent-block:note.md#1': ['hash-1'],
+	});
+	assert.deepEqual(index, {
+		'agent-block:note.md#0': 'hash-0',
+		'agent-block:note.md#1': 'hash-1',
+	});
+	assert.deepEqual(fingerprintIndex, {
+		'agent-block:note.md#0': 'fp-a',
+		'agent-block:note.md#1': 'fp-b',
+	});
+});
