@@ -53,10 +53,12 @@ export default class AgentBlocksPlugin extends Plugin {
 			getBlockPromptCacheKey: (blockCacheId: string) => this.getBlockPromptCacheKey(blockCacheId),
 			setBlockPromptCacheKey: async (blockCacheId: string, promptHash: string, blockSourceFingerprint: string) =>
 				this.setBlockPromptCacheKey(blockCacheId, promptHash, blockSourceFingerprint),
-		});
+			});
 
-		await this.garbageCollectOrphanedBlockCacheEntries();
 		this.registerOrphanGcListeners();
+		void this.garbageCollectOrphanedBlockCacheEntries().catch((error: unknown) => {
+			console.error('[Agent Blocks] Initial cache reconciliation failed.', error);
+		});
 
 		this.settingTab = new AgentSettingTab(this.app, this);
 		this.addSettingTab(this.settingTab);

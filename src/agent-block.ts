@@ -31,13 +31,19 @@ export function registerAgentCodeBlockProcessor(plugin: Plugin, dependencies: Ag
 		refreshButtonEl.type = 'button';
 		refreshButtonEl.ariaLabel = 'Refresh agent output';
 		const outputEl = blockEl.createDiv({ cls: 'agent-block__output' });
-		const blockCacheId = await buildBlockCacheId(
-			plugin.app,
-			source,
-			ctx.sourcePath,
-			ctx.getSectionInfo?.(el) ?? null,
-		);
 		const blockSourceFingerprint = buildBlockSourceFingerprint(source);
+		let blockCacheId = '';
+		try {
+			blockCacheId = await buildBlockCacheId(
+				plugin.app,
+				source,
+				ctx.sourcePath,
+				ctx.getSectionInfo?.(el) ?? null,
+			);
+		} catch (error: unknown) {
+			blockCacheId = `agent-block:fallback:${encodeURIComponent(ctx.sourcePath || '')}:${blockSourceFingerprint}`;
+			console.error('[Agent Blocks] Failed to build block cache id, using fallback id.', error);
+		}
 		let runSequence = 0;
 		let activeExecutionLogId: string | null = null;
 		let isRunning = false;

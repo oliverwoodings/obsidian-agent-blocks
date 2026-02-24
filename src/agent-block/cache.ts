@@ -189,13 +189,12 @@ async function readMarkdownFileContent(app: App, sourcePath: string): Promise<st
 
 function getOpenMarkdownViewContent(app: App, sourcePath: string): string | null {
 	let content: string | null = null;
-	const workspace = (app as { workspace?: unknown }).workspace;
-	const iterateAllLeaves = (workspace as { iterateAllLeaves?: unknown } | undefined)?.iterateAllLeaves;
-	if (typeof iterateAllLeaves !== 'function') {
+	const workspace = (app as { workspace?: { iterateAllLeaves?: (callback: (leaf: unknown) => void) => void } }).workspace;
+	if (!workspace || typeof workspace.iterateAllLeaves !== 'function') {
 		return null;
 	}
 
-	(iterateAllLeaves as (callback: (leaf: unknown) => void) => void)((leaf) => {
+	workspace.iterateAllLeaves((leaf) => {
 		if (content !== null) {
 			return;
 		}
